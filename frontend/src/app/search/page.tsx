@@ -5,24 +5,40 @@ import { Suspense, useEffect, useState } from "react";
 import { api, SearchResult } from "@/lib/api";
 import { ProductCard } from "@/components/ProductCard";
 import { EvidenceList } from "@/components/EvidenceList";
+import { NotFoundPrompt } from "@/components/NotFoundPrompt";
 
 function SearchInner() {
   const params = useSearchParams();
   const q = params.get("q") || "";
   const [result, setResult] = useState<SearchResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!q) {
       setResult(null);
+      setError(null);
+      setLoading(false);
       return;
     }
+    setResult(null);
+    setError(null);
     setLoading(true);
     api
       .search(q)
-      .then(setResult)
+      .then((data) => {
+        setResult(data);
+        setError(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Search failed"))
       .finally(() => setLoading(false));
   }, [q]);
+
+  const empty =
+    !!result &&
+    result.products.length === 0 &&
+    result.reports.length === 0 &&
+    result.semantic.length === 0;
 
   return (
     <div>
@@ -34,7 +50,9 @@ function SearchInner() {
       {q && loading && (
         <p className="mt-8 text-[#5a6d80]">Looking across the public web for related reports…</p>
       )}
-      {result && !loading && (
+      {error && <p className="mt-8 text-sm text-[#c45c6a]">{error}</p>}
+      {empty && !loading && <NotFoundPrompt query={q} />}
+      {result && !empty && !loading && (
         <div className="mt-8 grid gap-10">
           {result.discovery && (result.discovery.ingested > 0 || result.discovery.message) && (
             <p className="text-sm text-[#5a6d80]">
@@ -52,7 +70,7 @@ function SearchInner() {
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-[#5a6d80]">No matching products yet.</p>
+              <NotFoundPrompt query={q} title="No matching product yet" />
             )}
           </section>
           {!!result.semantic.length && (
@@ -68,10 +86,12 @@ function SearchInner() {
               </div>
             </section>
           )}
-          <section>
-            <h2 className="section-kicker mb-4">Matching notes</h2>
-            <EvidenceList reports={result.reports} />
-          </section>
+          {!!result.reports.length && (
+            <section>
+              <h2 className="section-kicker mb-4">Matching notes</h2>
+              <EvidenceList reports={result.reports} />
+            </section>
+          )}
         </div>
       )}
     </div>

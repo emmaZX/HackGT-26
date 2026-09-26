@@ -74,6 +74,7 @@ export type PostCard = {
   created_at: string | null;
   like_count: number;
   liked_by: string[];
+  liked_by_subs: string[];
   comments: {
     id: number;
     display_name: string;

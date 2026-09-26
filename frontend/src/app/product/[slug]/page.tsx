@@ -10,21 +10,34 @@ import { GeoMap } from "@/components/GeoMap";
 import { EvidenceList } from "@/components/EvidenceList";
 import { Community } from "@/components/Community";
 import { Disclaimer } from "@/components/Disclaimer";
+import { NotFoundPrompt } from "@/components/NotFoundPrompt";
 
 export default function ProductPage() {
   const { slug } = useParams<{ slug: string }>();
   const params = useSearchParams();
   const issue = params.get("issue");
   const [product, setProduct] = useState<ProductDetail | null>(null);
+  const [missing, setMissing] = useState(false);
   const [discoverNote, setDiscoverNote] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    api.product(slug, issue).then(setProduct);
+    setMissing(false);
+    api
+      .product(slug, issue)
+      .then(setProduct)
+      .catch(() => {
+        setProduct(null);
+        setMissing(true);
+      });
   }, [slug, issue]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  if (missing) {
+    return <NotFoundPrompt query={slug.replace(/-/g, " ")} title="Item not found" />;
+  }
 
   if (!product) {
     return <div className="card p-6 text-[#5a6d80]">One moment — gathering the story…</div>;

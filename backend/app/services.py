@@ -5,15 +5,20 @@ from datetime import datetime, timedelta
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
+import httpx
+
+from .auth import AuthUser
 from .config import get_settings
 from .data_sources.page_fetch import domain_of, fetch_readable
 from .data_sources.web_search import available_provider, niche_queries, search_web
+from .openai_http import _verify
+from .seed import CITIES as KNOWN_CITIES
 from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Report, ReportIssue, TimelineEvent
 from .pipeline.cluster import attach_and_dedupe
 from .pipeline.embeddings import similar_reports
 from .pipeline.extract import extract_report
 from .pipeline.signals import compute_signal, feed_cards
-from .security import sanitize_display_name, sanitize_text, snap_coordinate
+from .security import sanitize_text, snap_coordinate
 from .serialize import post_card, product_card, product_detail, report_card
 
 NEWS_DOMAINS = {
@@ -126,6 +131,7 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
                 Product.model.ilike(like),
                 Product.category.ilike(like),
                 Product.upc.ilike(like),
+                Product.slug.ilike(like),
                 Product.summary.ilike(like),
             )
         )
@@ -140,6 +146,9 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
         .all()
     )
     semantic = similar_reports(db, q, limit=12)
+    # Weak embedding hits should not hide a true miss.
+    if not products and not reports:
+        semantic = [(report, score) for report, score in semantic if score >= 0.72]
     semantic_products: dict[int, dict] = {}
     for report, score in semantic:
         card = semantic_products.setdefault(
@@ -184,9 +193,10 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
                     products = [found]
 
     product_cards = [product_card(product, compute_signal(db, product)) for product in products]
+    # Only promote strong semantic hits into the product list.
     seen = {card["id"] for card in product_cards}
     for item in semantic_products.values():
-        if item["product"]["id"] not in seen:
+        if item["score"] >= 0.72 and item["product"]["id"] not in seen:
             product_cards.append(item["product"])
 
     if discovery and discovery.get("ingested"):
@@ -249,13 +259,56 @@ def discover_from_query(db: Session, query: str) -> dict:
     return result
 
 
-def create_user_report(db: Session, payload: dict) -> dict:
+def search_locations(query: str) -> dict:
+    q = sanitize_text(query, 80)
+    if len(q) < 2:
+        return {"locations": []}
+    needle = q.lower()
+    results: list[dict] = []
+    seen: set[str] = set()
+    for label, (lat, lng) in KNOWN_CITIES.items():
+        if needle in label.lower():
+            results.append({"label": label, "latitude": lat, "longitude": lng, "detail": "United States"})
+            seen.add(label.lower())
+    try:
+        response = httpx.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": q, "count": 8, "language": "en", "format": "json"},
+            timeout=8.0,
+            verify=_verify(),
+        )
+        response.raise_for_status()
+        for row in response.json().get("results") or []:
+            name = sanitize_text(str(row.get("name") or ""), 80)
+            if not name:
+                continue
+            admin = sanitize_text(str(row.get("admin1") or ""), 80)
+            country = sanitize_text(str(row.get("country") or ""), 80)
+            label = f"{name}, {admin}" if admin and admin.lower() != name.lower() else name
+            key = label.lower()
+            if key in seen:
+                continue
+            results.append(
+                {
+                    "label": label[:160],
+                    "latitude": row.get("latitude"),
+                    "longitude": row.get("longitude"),
+                    "detail": ", ".join(part for part in (admin, country) if part),
+                }
+            )
+            seen.add(key)
+    except Exception:
+        pass
+    return {"locations": results[:8]}
+
+
+def create_user_report(db: Session, payload: dict, user: AuthUser) -> dict:
     product = _resolve_product(db, payload)
     text = sanitize_text(payload.get("text") or "", 4000)
     if len(text) < 12:
         raise ValueError("Please describe what happened in a bit more detail.")
-    display = sanitize_display_name(payload.get("display_name") or "Neighbor")
-    city = sanitize_text(payload.get("location_label") or "", 80) or None
+    display = user.display_name
+    city = sanitize_text(payload.get("location_label") or "", 160) or None
     lat = snap_coordinate(payload.get("latitude"))
     lng = snap_coordinate(payload.get("longitude"))
     extracted = extract_report(text, f"{product.brand} {product.name}")
@@ -275,6 +328,7 @@ def create_user_report(db: Session, payload: dict) -> dict:
         location_source="user" if city else "none",
         is_user_generated=True,
         display_name=display,
+        user_sub=user.sub,
         extra_json=None,
     )
     db.add(report)
@@ -286,6 +340,7 @@ def create_user_report(db: Session, payload: dict) -> dict:
         product_id=product.id,
         report_id=report.id,
         display_name=display,
+        user_sub=user.sub,
         title=report.title or text[:72],
         body=text,
         location_label=city,
@@ -301,15 +356,15 @@ def create_user_report(db: Session, payload: dict) -> dict:
     }
 
 
-def create_post(db: Session, payload: dict) -> dict:
+def create_post(db: Session, payload: dict, user: AuthUser) -> dict:
     product = get_product(db, payload["product_slug"])
     if not product:
         raise ValueError("Unknown product")
     body = sanitize_text(payload.get("body") or "", 4000)
     if len(body) < 4:
         raise ValueError("Write a short post first.")
-    display = sanitize_display_name(payload.get("display_name") or "Neighbor")
-    city = sanitize_text(payload.get("location_label") or "", 80) or None
+    display = user.display_name
+    city = sanitize_text(payload.get("location_label") or "", 160) or None
     as_report = bool(payload.get("counts_as_report", True))
     report = None
     if as_report:
@@ -321,6 +376,7 @@ def create_post(db: Session, payload: dict) -> dict:
             excerpt=body[:220],
             is_user_generated=True,
             display_name=display,
+            user_sub=user.sub,
             location_label=city,
             location_precision="city" if city else "none",
             location_source="user" if city else "none",
@@ -335,6 +391,7 @@ def create_post(db: Session, payload: dict) -> dict:
         product_id=product.id,
         report_id=report.id if report else None,
         display_name=display,
+        user_sub=user.sub,
         title=sanitize_text(payload.get("title") or "", 200) or None,
         body=body,
         location_label=city,
@@ -345,7 +402,7 @@ def create_post(db: Session, payload: dict) -> dict:
     return {"post": post_card(post), "product_slug": product.slug}
 
 
-def add_comment(db: Session, post_id: int, payload: dict) -> dict:
+def add_comment(db: Session, post_id: int, payload: dict, user: AuthUser) -> dict:
     post = db.query(Post).filter(Post.id == post_id).one_or_none()
     if not post:
         raise ValueError("Post not found")
@@ -354,7 +411,8 @@ def add_comment(db: Session, post_id: int, payload: dict) -> dict:
         raise ValueError("Comment is empty")
     comment = Comment(
         post_id=post.id,
-        display_name=sanitize_display_name(payload.get("display_name") or "Neighbor"),
+        display_name=user.display_name,
+        user_sub=user.sub,
         body=body,
     )
     db.add(comment)
@@ -368,7 +426,7 @@ def add_comment(db: Session, post_id: int, payload: dict) -> dict:
     return {"post": post_card(post)}
 
 
-def toggle_like(db: Session, post_id: int, display_name: str) -> dict:
+def toggle_like(db: Session, post_id: int, user: AuthUser) -> dict:
     post = (
         db.query(Post)
         .options(joinedload(Post.comments), joinedload(Post.likes))
@@ -377,12 +435,11 @@ def toggle_like(db: Session, post_id: int, display_name: str) -> dict:
     )
     if not post:
         raise ValueError("Post not found")
-    name = sanitize_display_name(display_name)
-    existing = next((like for like in post.likes if like.display_name == name), None)
+    existing = next((like for like in post.likes if like.user_sub == user.sub), None)
     if existing:
         db.delete(existing)
     else:
-        db.add(Like(post_id=post.id, display_name=name))
+        db.add(Like(post_id=post.id, display_name=user.display_name, user_sub=user.sub))
     db.commit()
     post = (
         db.query(Post)
@@ -410,8 +467,8 @@ def run_discovery(
         return {
             "provider": None,
             "message": (
-                "No search API key is configured. Add BRAVE_SEARCH_API_KEY "
-                "(or GEMINI_API_KEY / EXA_API_KEY) to enable live discovery."
+                "No search API key is configured. Add BRAVE_SEARCH_API_KEY, "
+                "OPENAI_API_KEY, GEMINI_API_KEY, or EXA_API_KEY to enable live discovery."
             ),
             "hits": [],
             "ingested": 0,
@@ -542,6 +599,12 @@ def _resolve_product(db: Session, payload: dict) -> Product:
     existing = get_product(db, slug)
     if existing:
         return existing
+    named = db.query(Product).filter(Product.name.ilike(name))
+    if brand:
+        named = named.filter(Product.brand.ilike(brand))
+    existing_named = named.first()
+    if existing_named:
+        return existing_named
     product = Product(
         slug=slug,
         brand=brand or "Unknown",

@@ -68,6 +68,7 @@ def post_card(post: Post) -> dict:
         "created_at": iso(post.created_at),
         "like_count": len(post.likes),
         "liked_by": [like.display_name for like in post.likes],
+        "liked_by_subs": [like.user_sub for like in post.likes if like.user_sub],
         "comments": [
             {
                 "id": comment.id,

@@ -31,12 +31,13 @@ def niche_queries(product_name: str, extra: str | None = None, max_queries: int 
 def search_web(queries: list[str], limit_per_query: int = 5) -> list[SearchHit]:
     """
     One search backend, no site-specific APIs.
-    Preference order: Gemini grounding → Exa → Brave.
-    Prefer Brave when only a Brave key is set; Gemini still wins if configured.
+    Preference order: OpenAI web search → Gemini grounding → Exa → Brave.
     """
     settings = get_settings()
     hits: list[SearchHit] = []
-    if settings.gemini_api_key:
+    if settings.openai_api_key:
+        hits = _openai_search(queries, settings)
+    elif settings.gemini_api_key:
         hits = _gemini_search(queries, settings)
     elif settings.exa_api_key:
         hits = _exa_search(queries, settings, limit_per_query)
@@ -47,6 +48,8 @@ def search_web(queries: list[str], limit_per_query: int = 5) -> list[SearchHit]:
 
 def available_provider() -> str | None:
     settings = get_settings()
+    if settings.openai_api_key:
+        return "openai"
     if settings.gemini_api_key:
         return "gemini"
     if settings.exa_api_key:
@@ -54,6 +57,65 @@ def available_provider() -> str | None:
     if settings.brave_search_api_key:
         return "brave"
     return None
+
+
+def _openai_search(queries: list[str], settings) -> list[SearchHit]:
+    from ..openai_http import openai_post
+
+    prompt = (
+        "Search the public web for first-person reports, forum threads, news, or official notices "
+        "about problems with these queries:\n"
+        + "\n".join(f"- {query}" for query in queries)
+        + "\nReturn a JSON list of objects with keys title, url, snippet. "
+        "Only include real http(s) pages. Prefer consumer reports and recall notices."
+    )
+    data = openai_post(
+        "/v1/responses",
+        settings.openai_api_key,
+        {
+            "model": settings.openai_search_model,
+            "tools": [{"type": "web_search"}],
+            "tool_choice": {"type": "web_search"},
+            "include": ["web_search_call.action.sources"],
+            "input": prompt,
+        },
+        timeout=60,
+    )
+    hits: list[SearchHit] = []
+    query = queries[0] if queries else "product safety"
+    for item in data.get("output") or []:
+        if item.get("type") == "web_search_call":
+            action = item.get("action") or {}
+            for source in action.get("sources") or []:
+                url = source.get("url")
+                if url:
+                    hits.append(SearchHit(title=url, url=url, snippet="", provider="openai", query=query))
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            for annotation in content.get("annotations") or []:
+                if annotation.get("type") == "url_citation" and annotation.get("url"):
+                    hits.append(
+                        SearchHit(
+                            title=annotation.get("title") or annotation["url"],
+                            url=annotation["url"],
+                            snippet="",
+                            provider="openai",
+                            query=query,
+                        )
+                    )
+            for match in _json_objects(content.get("text") or ""):
+                if match.get("url"):
+                    hits.append(
+                        SearchHit(
+                            title=match.get("title") or match["url"],
+                            url=match["url"],
+                            snippet=match.get("snippet") or "",
+                            provider="openai",
+                            query=query,
+                        )
+                    )
+    return [hit for hit in hits if hit.url.startswith(("http://", "https://"))]
 
 
 def _gemini_search(queries: list[str], settings) -> list[SearchHit]:

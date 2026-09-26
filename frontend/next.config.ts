@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  transpilePackages: ["aws-amplify", "@aws-amplify/core"],
   async rewrites() {
     return [
       {

@@ -75,6 +75,7 @@ class Report(Base):
     duplicate_of_id: Mapped[int | None] = mapped_column(ForeignKey("reports.id"), nullable=True)
     independence_weight: Mapped[float] = mapped_column(Float, default=1.0)
     display_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    user_sub: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     product: Mapped[Product] = relationship(back_populates="reports")
@@ -118,6 +119,7 @@ class Post(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     report_id: Mapped[int | None] = mapped_column(ForeignKey("reports.id"), nullable=True)
     display_name: Mapped[str] = mapped_column(String(80))
+    user_sub: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     body: Mapped[str] = mapped_column(Text)
     location_label: Mapped[str | None] = mapped_column(String(160), nullable=True)
@@ -134,6 +136,7 @@ class Comment(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"), index=True)
     display_name: Mapped[str] = mapped_column(String(80))
+    user_sub: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -142,11 +145,12 @@ class Comment(Base):
 
 class Like(Base):
     __tablename__ = "likes"
-    __table_args__ = (UniqueConstraint("post_id", "display_name"),)
+    __table_args__ = (UniqueConstraint("post_id", "user_sub"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"), index=True)
     display_name: Mapped[str] = mapped_column(String(80))
+    user_sub: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     post: Mapped[Post] = relationship(back_populates="likes")

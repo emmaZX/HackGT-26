@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 
 from .bootstrap import bootstrap_from_cpsc, start_home_scrape_background
 from .config import get_settings
-from .database import Base, SessionLocal, engine, get_db
+from .auth import AuthUser, require_user
+from .database import Base, SessionLocal, engine, ensure_schema, get_db
 from .models import Product
 from .pipeline.signals import compute_signal
 from .serialize import product_card
@@ -20,13 +21,14 @@ from .services import (
     product_payload,
     run_discovery,
     search_catalog,
+    search_locations,
     toggle_like,
 )
 
 settings = get_settings()
-Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
+Path(settings.resolved_upload_dir).mkdir(parents=True, exist_ok=True)
 Base.metadata.create_all(bind=engine)
-
+ensure_schema()
 with SessionLocal() as session:
     home_products = bootstrap_from_cpsc(session)
     home_slugs = [product.slug for product in home_products]
@@ -39,7 +41,7 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -75,10 +77,6 @@ class CommentIn(BaseModel):
     display_name: str | None = "Neighbor"
 
 
-class LikeIn(BaseModel):
-    display_name: str = "Neighbor"
-
-
 class DiscoverIn(BaseModel):
     extra: str | None = None
     force: bool = False
@@ -86,7 +84,12 @@ class DiscoverIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "app": settings.app_name, "live_search": settings.has_live_search()}
+    return {
+        "ok": True,
+        "app": settings.app_name,
+        "live_search": settings.has_live_search(),
+        "auth": settings.cognito_configured,
+    }
 
 
 @app.get("/api/feed")
@@ -113,34 +116,44 @@ def search(q: str = "", live: bool = True, db: Session = Depends(get_db)):
     return search_catalog(db, q, live=live)
 
 
+@app.get("/api/locations")
+def locations(q: str = ""):
+    return search_locations(q)
+
+
 @app.post("/api/reports")
-def reports(payload: ReportIn, db: Session = Depends(get_db)):
+def reports(payload: ReportIn, user: AuthUser = Depends(require_user), db: Session = Depends(get_db)):
     try:
-        return create_user_report(db, payload.model_dump())
+        return create_user_report(db, payload.model_dump(), user)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/posts")
-def posts(payload: PostIn, db: Session = Depends(get_db)):
+def posts(payload: PostIn, user: AuthUser = Depends(require_user), db: Session = Depends(get_db)):
     try:
-        return create_post(db, payload.model_dump())
+        return create_post(db, payload.model_dump(), user)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/posts/{post_id}/comments")
-def comments(post_id: int, payload: CommentIn, db: Session = Depends(get_db)):
+def comments(
+    post_id: int,
+    payload: CommentIn,
+    user: AuthUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
     try:
-        return add_comment(db, post_id, payload.model_dump())
+        return add_comment(db, post_id, payload.model_dump(), user)
     except ValueError as exc:
         raise HTTPException(404 if "not found" in str(exc).lower() else 400, str(exc)) from exc
 
 
 @app.post("/api/posts/{post_id}/likes")
-def likes(post_id: int, payload: LikeIn, db: Session = Depends(get_db)):
+def likes(post_id: int, user: AuthUser = Depends(require_user), db: Session = Depends(get_db)):
     try:
-        return toggle_like(db, post_id, payload.display_name)
+        return toggle_like(db, post_id, user)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
 
