@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f6f1e8;
+  --card: #fffdf8;
+  --ink: #1a365d;
+  --muted: #5a6d80;
+  --blush: #e8a8b0;
+  --blush-deep: #c45c6a;
+  --sky: #d7e4f2;
+  --navy: #16324f;
+  --porcelain: #5b8fb5;
+  --gold: #c9a84c;
+  --ok: #4f9d78;
+  --line: #e4d9c8;
+}
+
+html,
+body {
+  background: var(--paper);
+  color: var(--ink);
+  min-height: 100%;
+}
+
+body {
+  font-family: "Segoe UI", "Avenir Next", system-ui, sans-serif;
+  word-spacing: normal;
+  letter-spacing: 0.01em;
+  background-image:
+    radial-gradient(900px 520px at 8% -8%, rgba(232, 168, 176, 0.28), transparent 55%),
+    radial-gradient(800px 480px at 100% 0%, rgba(215, 228, 242, 0.7), transparent 50%),
+    radial-gradient(700px 420px at 70% 110%, rgba(201, 168, 76, 0.12), transparent 45%);
+}
+
+a {
+  color: inherit;
+}
+
+.serif {
+  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  letter-spacing: -0.02em;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  box-shadow: 0 10px 30px rgba(26, 54, 93, 0.05);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  font-weight: 650;
+}
+
+.field {
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 0.65rem 0.85rem;
+  outline: none;
+}
+
+.field:focus,
+.field:focus-visible {
+  border-color: var(--porcelain);
+  box-shadow: 0 0 0 3px rgba(91, 143, 181, 0.15);
+}
+
+.btn-primary {
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fffdf8;
+  font-weight: 650;
+}
+
+.btn-primary:hover {
+  background: #22487a;
+}
+
+.btn-soft {
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.section-kicker {
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--porcelain);
+  font-weight: 700;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.rise {
+  animation: rise 0.55s ease both;
+}
+
+.blossom {
+  position: absolute;
+  border-radius: 999px;
+  pointer-events: none;
+}

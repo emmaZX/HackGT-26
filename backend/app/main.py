@@ -1,0 +1,148 @@
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from .config import get_settings
+from .database import Base, SessionLocal, engine, get_db
+from .models import Product
+from .pipeline.signals import compute_signal
+from .seed import seed_if_empty
+from .serialize import product_card
+from .services import (
+    add_comment,
+    create_post,
+    create_user_report,
+    get_product,
+    list_feed,
+    product_payload,
+    run_discovery,
+    search_catalog,
+    toggle_like,
+)
+
+settings = get_settings()
+Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
+Base.metadata.create_all(bind=engine)
+with SessionLocal() as session:
+    seed_if_empty(session)
+
+app = FastAPI(title="Recall Me Maybe", version="0.1.0", docs_url="/docs")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
+
+class ReportIn(BaseModel):
+    product_slug: str | None = None
+    product_name: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    upc: str | None = None
+    category: str | None = None
+    text: str = Field(min_length=12, max_length=4000)
+    title: str | None = None
+    display_name: str | None = "Neighbor"
+    location_label: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    incident_date: str | None = None
+
+
+class PostIn(BaseModel):
+    product_slug: str
+    body: str = Field(min_length=4, max_length=4000)
+    title: str | None = None
+    display_name: str | None = "Neighbor"
+    location_label: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    counts_as_report: bool = True
+
+
+class CommentIn(BaseModel):
+    body: str = Field(min_length=2, max_length=2000)
+    display_name: str | None = "Neighbor"
+
+
+class LikeIn(BaseModel):
+    display_name: str = "Neighbor"
+
+
+class DiscoverIn(BaseModel):
+    extra: str | None = None
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "app": settings.app_name, "live_search": settings.has_live_search()}
+
+
+@app.get("/api/feed")
+def feed(city: str | None = None, db: Session = Depends(get_db)):
+    return list_feed(db, city=city)
+
+
+@app.get("/api/products")
+def products(db: Session = Depends(get_db)):
+    rows = db.query(Product).order_by(Product.name).all()
+    return {"products": [product_card(row, compute_signal(db, row)) for row in rows]}
+
+
+@app.get("/api/products/{slug}")
+def product(slug: str, issue: str | None = None, db: Session = Depends(get_db)):
+    row = get_product(db, slug)
+    if not row:
+        raise HTTPException(404, "Product not found")
+    return product_payload(db, row, issue_slug=issue)
+
+
+@app.get("/api/search")
+def search(q: str = "", db: Session = Depends(get_db)):
+    return search_catalog(db, q)
+
+
+@app.post("/api/reports")
+def reports(payload: ReportIn, db: Session = Depends(get_db)):
+    try:
+        return create_user_report(db, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/posts")
+def posts(payload: PostIn, db: Session = Depends(get_db)):
+    try:
+        return create_post(db, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/posts/{post_id}/comments")
+def comments(post_id: int, payload: CommentIn, db: Session = Depends(get_db)):
+    try:
+        return add_comment(db, post_id, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(404 if "not found" in str(exc).lower() else 400, str(exc)) from exc
+
+
+@app.post("/api/posts/{post_id}/likes")
+def likes(post_id: int, payload: LikeIn, db: Session = Depends(get_db)):
+    try:
+        return toggle_like(db, post_id, payload.display_name)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/products/{slug}/discover")
+def discover(slug: str, payload: DiscoverIn | None = None, db: Session = Depends(get_db)):
+    try:
+        return run_discovery(db, slug, extra=(payload.extra if payload else None))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
