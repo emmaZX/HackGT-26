@@ -43,6 +43,7 @@ export type ProductCard = {
   upc: string | null;
   manufacturer: string | null;
   summary: string | null;
+  image_url: string | null;
   signal: Signal;
   local: boolean;
   tags: string[];

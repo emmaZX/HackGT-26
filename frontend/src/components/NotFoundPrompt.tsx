@@ -14,12 +14,12 @@ export function NotFoundPrompt({
   return (
     <div className="card mt-8 p-6">
       <h2 className="serif text-3xl">{title}</h2>
-      <p className="mt-2 text-[#5a6d80]">
+      <p className="mt-2 text-[#627290]">
         Nothing in the catalog matches
         {query?.trim() ? (
           <>
             {" "}
-            <strong className="text-[#1a365d]">“{query.trim()}”</strong>
+            <strong className="text-[#031d4e]">“{query.trim()}”</strong>
           </>
         ) : (
           " that search"

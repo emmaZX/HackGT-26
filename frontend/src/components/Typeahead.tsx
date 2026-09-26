@@ -51,7 +51,7 @@ export function Typeahead<T>({
         <div className="field flex items-center justify-between gap-3">
           <div className="min-w-0">{selected}</div>
           {onClearSelected && (
-            <button type="button" onClick={onClearSelected} className="shrink-0 text-sm text-[#5b8fb5]">
+            <button type="button" onClick={onClearSelected} className="shrink-0 text-sm text-[#627290]">
               Change
             </button>
           )}
@@ -77,10 +77,10 @@ export function Typeahead<T>({
           className="field w-full"
           autoComplete="off"
         />
-        {hint && <p className="mt-1 text-xs text-[#5a6d80]">{hint}</p>}
+        {hint && <p className="mt-1 text-xs text-[#627290]">{hint}</p>}
         {showList && (
-          <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-2xl border border-[#e4d9c8] bg-white shadow-lg">
-            {loading && <div className="px-4 py-3 text-sm text-[#5a6d80]">Looking…</div>}
+          <div className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-2xl border border-[#e0e3e9] bg-white shadow-lg">
+            {loading && <div className="px-4 py-3 text-sm text-[#627290]">Looking…</div>}
             {items.map((item) => (
               <button
                 key={itemKey(item)}
@@ -89,7 +89,7 @@ export function Typeahead<T>({
                   onSelect(item);
                   setOpen(false);
                 }}
-                className="block w-full px-4 py-2.5 text-left text-sm hover:bg-[#f6f1e8]"
+                className="block w-full px-4 py-2.5 text-left text-sm hover:bg-[#f8f8ff]"
               >
                 {renderItem(item)}
               </button>

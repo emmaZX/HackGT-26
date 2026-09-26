@@ -11,7 +11,7 @@ import { ProductCard as Product } from "@/lib/types";
 
 export default function ReportPage() {
   return (
-    <Suspense fallback={<div className="mx-auto max-w-2xl text-[#5a6d80]">One moment…</div>}>
+    <Suspense fallback={<div className="mx-auto max-w-2xl text-[#627290]">One moment…</div>}>
       <ReportForm />
     </Suspense>
   );
@@ -129,15 +129,15 @@ function ReportForm() {
   }
 
   if (!ready || !user) {
-    return <div className="mx-auto max-w-2xl text-[#5a6d80]">One moment…</div>;
+    return <div className="mx-auto max-w-2xl text-[#627290]">One moment…</div>;
   }
 
   return (
     <div className="mx-auto max-w-2xl">
       <h1 className="serif text-4xl">Tell us what happened</h1>
-      <p className="mt-2 text-[#5a6d80]">
+      <p className="mt-2 text-[#627290]">
         Your note always helps the overall picture. Adding a city is optional. Posting as{" "}
-        <strong className="text-[#1a365d]">{user.displayName}</strong>.
+        <strong className="text-[#031d4e]">{user.displayName}</strong>.
       </p>
       <form onSubmit={submit} className="card mt-8 grid gap-4 p-6">
         <Typeahead
@@ -152,8 +152,8 @@ function ReportForm() {
           itemKey={(product) => product.slug}
           renderItem={(product) => (
             <span>
-              <span className="font-medium text-[#1a365d]">{product.name}</span>
-              <span className="text-[#5a6d80]"> · {product.brand}</span>
+              <span className="font-medium text-[#031d4e]">{product.name}</span>
+              <span className="text-[#627290]"> · {product.brand}</span>
             </span>
           )}
           onSelect={(product) => {
@@ -165,7 +165,7 @@ function ReportForm() {
             selectedProduct ? (
               <span>
                 <strong>{selectedProduct.name}</strong>
-                <span className="text-[#5a6d80]"> · {selectedProduct.brand}</span>
+                <span className="text-[#627290]"> · {selectedProduct.brand}</span>
               </span>
             ) : addingNew ? (
               <span>
@@ -191,7 +191,7 @@ function ReportForm() {
                     product_name: current.product_name || productQuery.trim(),
                   }));
                 }}
-                className="block w-full border-t border-[#e4d9c8] px-4 py-2.5 text-left text-sm text-[#1a365d] hover:bg-[#f6f1e8]"
+                className="block w-full border-t border-[#e0e3e9] px-4 py-2.5 text-left text-sm text-[#031d4e] hover:bg-[#f8f8ff]"
               >
                 Add a new product: <strong>{productQuery.trim()}</strong>
               </button>
@@ -251,8 +251,8 @@ function ReportForm() {
           itemKey={(city) => `${city.label}-${city.latitude}-${city.longitude}`}
           renderItem={(city) => (
             <span>
-              <span className="font-medium text-[#1a365d]">{city.label}</span>
-              {city.detail && <span className="text-[#5a6d80]"> · {city.detail}</span>}
+              <span className="font-medium text-[#031d4e]">{city.label}</span>
+              {city.detail && <span className="text-[#627290]"> · {city.detail}</span>}
             </span>
           )}
           onSelect={(city) => {
@@ -271,11 +271,11 @@ function ReportForm() {
         <button disabled={busy} className="btn-primary px-5 py-3 disabled:opacity-40">
           {busy ? "Sending…" : "Share my note"}
         </button>
-        {message && <p className="text-sm text-[#5a6d80]">{message}</p>}
+        {message && <p className="text-sm text-[#627290]">{message}</p>}
       </form>
-      <p className="mt-4 text-sm text-[#5a6d80]">
+      <p className="mt-4 text-sm text-[#627290]">
         Not you?{" "}
-        <Link href="/login?next=/report" className="font-semibold text-[#1a365d]">
+        <Link href="/login?next=/report" className="font-semibold text-[#031d4e]">
           Switch accounts
         </Link>
       </p>

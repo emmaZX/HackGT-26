@@ -1,19 +1,36 @@
-const STYLES: Record<string, string> = {
-  "INTERNET FIRST": "bg-[#e8f6ef] text-[#1f7a4d] border border-[#b7d7c6]",
-  "FDA RECALL": "bg-[#f8dce0] text-[#9a3140] border border-[#e8a8b0]",
-  "CPSC RECALL": "bg-[#f8dce0] text-[#9a3140] border border-[#e8a8b0]",
-  "OFFICIAL RECALL": "bg-[#f8dce0] text-[#9a3140] border border-[#e8a8b0]",
-  "EMERGING SIGNAL": "bg-[#f7e8c4] text-[#7a5b16] border border-[#e6d09a]",
-  "STRONG SIGNAL": "bg-[#f7e8c4] text-[#7a5b16] border border-[#d4b65a]",
-  "ELEVATED REPORTS": "bg-[#ede4d2] text-[#6a5430] border border-[#e4d9c8]",
-  "LIMITED REPORTS": "bg-[#eef3f8] text-[#5a6d80] border border-[#d7e4f2]",
-  LOCAL: "bg-[#d7e4f2] text-[#1a365d] border border-[#b9cde0]",
-  NATIONWIDE: "bg-[#eef3f8] text-[#5a6d80] border border-[#d7e4f2]",
-  TRENDING: "bg-[#f6e7ea] text-[#c45c6a] border border-[#e8a8b0]",
-  CPSC: "bg-[#eef3f8] text-[#5a6d80] border border-[#d7e4f2]",
-  FDA: "bg-[#e7f6ee] text-[#1f7a4d] border border-[#b7d7c6]",
-};
+const RECALL = new Set(["FDA RECALL", "CPSC RECALL", "OFFICIAL RECALL"]);
+const SIGNAL = new Set(["STRONG SIGNAL", "EMERGING SIGNAL", "ELEVATED REPORTS", "LIMITED REPORTS"]);
+const ACRONYMS = new Set(["CPSC", "FDA"]);
 
+export const isRecallTag = (tag: string | null | undefined) => !!tag && RECALL.has(tag);
+
+/**
+ * Split backend tags into one status badge and the small pills.
+ * An active recall wins over a signal; everything else (INTERNET FIRST, LOCAL, TRENDING, agencies) is a pill.
+ */
+export function splitTags(tags: string[]) {
+  const status = tags.find((t) => RECALL.has(t)) || tags.find((t) => SIGNAL.has(t)) || null;
+  return {
+    status,
+    pills: tags.filter((t) => !RECALL.has(t) && !SIGNAL.has(t)),
+  };
+}
+
+export function StatusBadge({ label }: { label: string }) {
+  if (RECALL.has(label)) {
+    return <span className="badge bg-[#ff96a6] text-white">{label}</span>;
+  }
+  if (label === "STRONG SIGNAL" || label === "EMERGING SIGNAL") {
+    return <span className="badge border border-[#ff96a6] bg-white text-[#d9546a]">{label}</span>;
+  }
+  return <span className="badge border border-[#c0d4ef] bg-white text-[#627290]">{label}</span>;
+}
+
+export function Pill({ label }: { label: string }) {
+  return <span className="pill">{ACRONYMS.has(label) ? label : label.toLowerCase()}</span>;
+}
+
+/** For pages that just render a list of tags */
 export function Tag({ label }: { label: string }) {
-  return <span className={`tag ${STYLES[label] || STYLES["LIMITED REPORTS"]}`}>{label}</span>;
+  return RECALL.has(label) || SIGNAL.has(label) ? <StatusBadge label={label} /> : <Pill label={label} />;
 }

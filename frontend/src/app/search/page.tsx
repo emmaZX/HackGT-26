@@ -43,19 +43,19 @@ function SearchInner() {
   return (
     <div>
       <h1 className="serif text-4xl">Look something up</h1>
-      <p className="mt-2 text-[#5a6d80]">
+      <p className="mt-2 text-[#627290]">
         Try a brand, a product name, or a plain-English problem like “smells like burning plastic.”
       </p>
-      {!q && <p className="mt-8 text-[#5a6d80]">Type a few words in the search box above.</p>}
+      {!q && <p className="mt-8 text-[#627290]">Type a few words in the search box above.</p>}
       {q && loading && (
-        <p className="mt-8 text-[#5a6d80]">Looking across the public web for related reports…</p>
+        <p className="mt-8 text-[#627290]">Looking across the public web for related reports…</p>
       )}
-      {error && <p className="mt-8 text-sm text-[#c45c6a]">{error}</p>}
+      {error && <p className="mt-8 text-sm text-[#d9546a]">{error}</p>}
       {empty && !loading && <NotFoundPrompt query={q} />}
       {result && !empty && !loading && (
         <div className="mt-8 grid gap-10">
           {result.discovery && (result.discovery.ingested > 0 || result.discovery.message) && (
-            <p className="text-sm text-[#5a6d80]">
+            <p className="text-sm text-[#627290]">
               {result.discovery.ingested > 0
                 ? `Live discovery added ${result.discovery.ingested} public page${result.discovery.ingested === 1 ? "" : "s"} via ${result.discovery.provider || "search"}.`
                 : result.discovery.message}
@@ -64,7 +64,7 @@ function SearchInner() {
           <section>
             <h2 className="section-kicker mb-4">Products</h2>
             {result.products.length ? (
-              <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-[30px] sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {result.products.map((product) => (
                   <ProductCard key={product.slug} product={product} />
                 ))}
@@ -79,8 +79,8 @@ function SearchInner() {
               <div className="grid gap-3">
                 {result.semantic.map((item) => (
                   <a key={item.product.slug} href={`/product/${item.product.slug}`} className="card p-4">
-                    <div className="text-sm text-[#5b8fb5]">{item.product.name}</div>
-                    <p className="mt-1 text-sm text-[#5a6d80]">“{item.matched_excerpt}”</p>
+                    <div className="text-sm text-[#627290]">{item.product.name}</div>
+                    <p className="mt-1 text-sm text-[#627290]">“{item.matched_excerpt}”</p>
                   </a>
                 ))}
               </div>

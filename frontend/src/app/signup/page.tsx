@@ -8,7 +8,7 @@ import { authErrorMessage, confirmAccount, isAuthConfigured, registerAccount, re
 
 export default function SignupPage() {
   return (
-    <Suspense fallback={<div className="mx-auto max-w-md text-[#5a6d80]">Loading…</div>}>
+    <Suspense fallback={<div className="mx-auto max-w-md text-[#627290]">Loading…</div>}>
       <SignupForm />
     </Suspense>
   );
@@ -31,7 +31,7 @@ function SignupForm() {
     return (
       <div className="mx-auto max-w-md">
         <h1 className="serif text-4xl">Create an account</h1>
-        <p className="card mt-6 p-6 text-sm text-[#5a6d80]">
+        <p className="card mt-6 p-6 text-sm text-[#627290]">
           Cognito is not configured yet. Add the user pool id and app client id to
           <code className="mx-1">frontend/.env.local</code> and restart Next.js.
         </p>
@@ -94,7 +94,7 @@ function SignupForm() {
   return (
     <div className="mx-auto max-w-md">
       <h1 className="serif text-4xl">Join the neighbors</h1>
-      <p className="mt-2 text-[#5a6d80]">Create an account to share what happened with a product.</p>
+      <p className="mt-2 text-[#627290]">Create an account to share what happened with a product.</p>
       <form onSubmit={submit} className="card mt-8 grid gap-4 p-6">
         {!needsCode ? (
           <>
@@ -131,7 +131,7 @@ function SignupForm() {
                 onChange={(e) => setPassword(e.target.value)}
                 className="field"
               />
-              <span className="text-xs text-[#5a6d80]">
+              <span className="text-xs text-[#627290]">
                 At least 8 characters, with upper, lower, a number, and a symbol.
               </span>
             </label>
@@ -156,11 +156,11 @@ function SignupForm() {
             Resend code
           </button>
         )}
-        {message && <p className="text-sm text-[#5a6d80]">{message}</p>}
+        {message && <p className="text-sm text-[#627290]">{message}</p>}
       </form>
-      <p className="mt-4 text-sm text-[#5a6d80]">
+      <p className="mt-4 text-sm text-[#627290]">
         Already have an account?{" "}
-        <Link href={`/login?next=${encodeURIComponent(next)}`} className="font-semibold text-[#1a365d]">
+        <Link href={`/login?next=${encodeURIComponent(next)}`} className="font-semibold text-[#031d4e]">
           Sign in
         </Link>
       </p>

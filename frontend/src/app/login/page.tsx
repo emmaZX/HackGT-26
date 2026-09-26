@@ -15,7 +15,7 @@ import {
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="mx-auto max-w-md text-[#5a6d80]">Loading…</div>}>
+    <Suspense fallback={<div className="mx-auto max-w-md text-[#627290]">Loading…</div>}>
       <LoginForm />
     </Suspense>
   );
@@ -37,7 +37,7 @@ function LoginForm() {
     return (
       <div className="mx-auto max-w-md">
         <h1 className="serif text-4xl">Sign in</h1>
-        <p className="card mt-6 p-6 text-sm text-[#5a6d80]">
+        <p className="card mt-6 p-6 text-sm text-[#627290]">
           Cognito is not configured yet. Add the user pool id and app client id to
           <code className="mx-1">frontend/.env.local</code> and restart Next.js. The README has the
           console checklist.
@@ -97,7 +97,7 @@ function LoginForm() {
   return (
     <div className="mx-auto max-w-md">
       <h1 className="serif text-4xl">Welcome back</h1>
-      <p className="mt-2 text-[#5a6d80]">Sign in to share a complaint or a neighbor note.</p>
+      <p className="mt-2 text-[#627290]">Sign in to share a complaint or a neighbor note.</p>
       <form onSubmit={submit} className="card mt-8 grid gap-4 p-6">
         <label className="grid gap-1 text-sm">
           Email
@@ -139,11 +139,11 @@ function LoginForm() {
         <button type="button" disabled={busy || !email} onClick={resend} className="btn-soft px-5 py-3 text-sm">
           Email me a confirmation code
         </button>
-        {message && <p className="text-sm text-[#c45c6a]">{message}</p>}
+        {message && <p className="text-sm text-[#d9546a]">{message}</p>}
       </form>
-      <p className="mt-4 text-sm text-[#5a6d80]">
+      <p className="mt-4 text-sm text-[#627290]">
         New here?{" "}
-        <Link href={`/signup?next=${encodeURIComponent(next)}`} className="font-semibold text-[#1a365d]">
+        <Link href={`/signup?next=${encodeURIComponent(next)}`} className="font-semibold text-[#031d4e]">
           Create an account
         </Link>
       </p>

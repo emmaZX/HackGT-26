@@ -1,110 +1,181 @@
 @import "tailwindcss";
 
+/* Tokens sampled from the Figma frames */
 :root {
-  --paper: #f6f1e8;
-  --card: #fffdf8;
-  --ink: #1a365d;
-  --muted: #5a6d80;
-  --blush: #e8a8b0;
-  --blush-deep: #c45c6a;
-  --sky: #d7e4f2;
-  --navy: #16324f;
-  --porcelain: #5b8fb5;
-  --gold: #c9a84c;
-  --ok: #4f9d78;
-  --line: #e4d9c8;
+  --bg: #f8f8ff;
+  --card: #ffffff;
+  --navy: #031d4e;
+  --periwinkle: #c0d4ef;
+  --search: #ecf0fc;
+  --pink: #ff96a6;
+  --pink-ink: #d9546a;
+  --muted: #627290;
+  --hairline: #e0e3e9;
+  --field-line: #eceef3;
+  --placeholder: #c9ccd6;
+  --skeleton: #f5f5f5;
+}
+
+@theme inline {
+  --font-raleway: var(--font-raleway-next), "Raleway", system-ui, sans-serif;
+  --font-mulish: var(--font-mulish-next), "Mulish", system-ui, sans-serif;
 }
 
 html,
 body {
-  background: var(--paper);
-  color: var(--ink);
+  background: var(--bg);
+  color: var(--navy);
   min-height: 100%;
 }
 
 body {
-  font-family: "Segoe UI", "Avenir Next", system-ui, sans-serif;
-  word-spacing: normal;
-  letter-spacing: 0.01em;
-  background-image:
-    radial-gradient(900px 520px at 8% -8%, rgba(232, 168, 176, 0.28), transparent 55%),
-    radial-gradient(800px 480px at 100% 0%, rgba(215, 228, 242, 0.7), transparent 50%),
-    radial-gradient(700px 420px at 70% 110%, rgba(201, 168, 76, 0.12), transparent 45%);
+  font-family: var(--font-mulish);
+  overflow-x: clip;
 }
 
 a {
   color: inherit;
 }
 
-.serif {
-  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
-  letter-spacing: -0.02em;
+::placeholder {
+  color: var(--placeholder);
+}
+
+:focus-visible {
+  outline: 2px solid var(--navy);
+  outline-offset: 2px;
+}
+
+/* Section heading from Figma: Raleway Medium 18, -4%, periwinkle underline */
+.section-title {
+  display: inline-block;
+  font-family: var(--font-raleway);
+  font-weight: 500;
+  font-size: 18px;
+  letter-spacing: -0.04em;
+  line-height: 1.2;
+  color: var(--navy);
+}
+
+.section-title::after {
+  content: "";
+  display: block;
+  height: 3px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--periwinkle);
 }
 
 .card {
   background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 26px;
-  box-shadow: 0 10px 30px rgba(26, 54, 93, 0.05);
+  border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(3, 29, 78, 0.08);
 }
 
-.tag {
+.skeleton {
+  background: var(--skeleton);
+  border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(3, 29, 78, 0.06);
+}
+
+/* Status badge (OFFICIAL RECALL etc.): Raleway SemiBold 12, -2% */
+.badge {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.25rem 0.7rem;
+  height: 24px;
+  padding: 0 9px;
   border-radius: 999px;
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  font-weight: 650;
+  font-family: var(--font-raleway);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+/* Pill tags (nationwide, CPSC): Raleway Medium 12, -2% */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--periwinkle);
+  color: #fff;
+  font-family: var(--font-raleway);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
 }
 
 .field {
-  border-radius: 16px;
-  border: 1px solid var(--line);
+  width: 100%;
+  border-radius: 18px;
+  border: 1px solid var(--field-line);
   background: #fff;
-  padding: 0.65rem 0.85rem;
+  padding: 0.45rem 1rem;
   outline: none;
+  color: var(--navy);
 }
 
 .field:focus,
 .field:focus-visible {
-  border-color: var(--porcelain);
-  box-shadow: 0 0 0 3px rgba(91, 143, 181, 0.15);
+  border-color: var(--periwinkle);
+  box-shadow: 0 0 0 3px rgba(192, 212, 239, 0.45);
 }
 
 .btn-primary {
   border-radius: 999px;
-  background: var(--ink);
-  color: #fffdf8;
-  font-weight: 650;
-}
-
-.btn-primary:hover {
-  background: #22487a;
+  background: var(--navy);
+  color: #fff;
+  font-weight: 600;
 }
 
 .btn-soft {
   border-radius: 999px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--periwinkle);
   background: #fff;
 }
 
+/* Kept so the pages that aren't in Figma yet (search, browse, report) still match */
+.serif {
+  font-family: var(--font-mulish);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+
 .section-kicker {
-  font-size: 0.78rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--porcelain);
-  font-weight: 700;
+  font-family: var(--font-raleway);
+  font-weight: 500;
+  font-size: 18px;
+  letter-spacing: -0.04em;
+  color: var(--navy);
 }
 
-@keyframes rise {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+.line-clamp-2,
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.line-clamp-2 { -webkit-line-clamp: 2; }
+.line-clamp-3 { -webkit-line-clamp: 3; }
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
-.rise {
-  animation: rise 0.55s ease both;
+/* Leaflet overrides so the map reads like the Figma frame */
+.leaflet-container {
+  font-family: var(--font-mulish);
+  background: #e5e5e5;
+}
+.leaflet-control-attribution {
+  font-size: 9px;
+  background: rgba(255, 255, 255, 0.7) !important;
 }
 
 .blossom {
@@ -136,4 +207,12 @@ a {
   );
   background-size: 200% 100%;
   animation: home-shimmer 1.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
 }

@@ -15,10 +15,10 @@ export default function ExplorePage() {
   return (
     <div>
       <h1 className="serif text-4xl">Browse products</h1>
-      <p className="mt-2 max-w-2xl text-[#5a6d80]">
+      <p className="mt-2 max-w-2xl text-[#627290]">
         Each page keeps the official recall, if there is one, separate from neighbor stories.
       </p>
-      <div className="mt-8 grid gap-4 md:grid-cols-2">
+      <div className="mt-8 grid gap-[30px] sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {products.map((product) => (
           <ProductCard key={product.slug} product={product} />
         ))}

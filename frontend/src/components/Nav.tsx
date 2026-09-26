@@ -1,23 +1,28 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
-import { useAuth } from "@/lib/AuthProvider";
+import { useRouter } from "next/navigation";
+import { FormEvent, useEffect, useState } from "react";
 import { Logo } from "./Logo";
+import { PostModal } from "./PostModal";
+import { AccountMenu } from "./AccountMenu";
 
-const LINKS = [
-  { href: "/", label: "Home" },
-  { href: "/explore", label: "Browse" },
-  { href: "/search", label: "Look up" },
-  { href: "/report", label: "Tell us" },
-];
+/**
+ * One size knob for the logo, name and date: 26px on phones, 34px at 1440 wide.
+ * Change the clamp to resize the whole left block.
+ */
+const BRAND_SIZE = "text-[clamp(26px,2.36vw,34px)]";
 
 export function Nav() {
-  const pathname = usePathname();
   const router = useRouter();
-  const { user, ready, logout } = useAuth();
   const [q, setQ] = useState("");
+  const [today, setToday] = useState("");
+  const [posting, setPosting] = useState(false);
+
+  // Set on the client so the server render and the visitor's date never disagree
+  useEffect(() => {
+    setToday(new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" }));
+  }, []);
 
   function onSearch(event: FormEvent) {
     event.preventDefault();
@@ -26,73 +31,48 @@ export function Nav() {
   }
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#e4d9c8]/80 bg-[#f6f1e8]/85 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-6xl items-center gap-6 px-5 py-4">
-        <Link href="/" className="shrink-0">
-          <Logo compact />
-        </Link>
-        <nav className="hidden items-center gap-5 text-sm md:flex">
-          {LINKS.map((link) => (
-            <Link
-              key={link.href}
-              href={link.href}
-              className={pathname === link.href ? "font-semibold text-[#1a365d]" : "text-[#5a6d80] hover:text-[#1a365d]"}
-            >
-              {link.label}
-            </Link>
-          ))}
-        </nav>
-        <form onSubmit={onSearch} className="ml-auto flex min-w-0 flex-1 justify-end">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Look up a product or a problem"
-            className="field w-full max-w-md rounded-full"
-          />
-        </form>
-        <div className="hidden shrink-0 items-center gap-3 md:flex">
-          {ready && user ? (
-            <>
-              <span className="max-w-[8rem] truncate text-sm text-[#1a365d]">{user.displayName}</span>
-              <button type="button" onClick={() => logout()} className="btn-soft px-3 py-2 text-sm">
-                Sign out
-              </button>
-            </>
-          ) : (
-            <>
-              <Link href={`/login?next=${encodeURIComponent(pathname || "/")}`} className="text-sm text-[#5a6d80]">
-                Sign in
-              </Link>
-              <Link href="/signup" className="btn-soft px-3 py-2 text-sm">
-                Sign up
-              </Link>
-            </>
-          )}
-          <Link href="/report" className="btn-primary px-4 py-2 text-sm">
-            Tell us what happened
+    <header className="border-b border-[#c0d4ef] bg-[#f8f8ff]">
+      {/* items-end: search, + and avatar share a bottom edge with the date */}
+      <div className="mx-auto flex max-w-[1340px] flex-wrap items-end gap-x-[13px] gap-y-4 px-5 py-[clamp(16px,1.7vw,24px)] md:flex-nowrap">
+        <div className={`min-w-0 ${BRAND_SIZE}`}>
+          <Link href="/" aria-label="Recall Me Maybe home" className="block">
+            <Logo />
           </Link>
-        </div>
-      </div>
-      <div className="mx-auto flex max-w-6xl items-center gap-4 overflow-x-auto px-5 pb-3 text-sm md:hidden">
-        {LINKS.map((link) => (
-          <Link
-            key={link.href}
-            href={link.href}
-            className={pathname === link.href ? "font-semibold text-[#1a365d]" : "text-[#5a6d80]"}
+          <div
+            className="ml-[0.05em] mt-[0.12em] min-h-[1em] font-mulish font-semibold leading-none tracking-[-0.04em] text-[#c0d4ef]"
+            suppressHydrationWarning
           >
-            {link.label}
-          </Link>
-        ))}
-        {ready && user ? (
-          <button type="button" onClick={() => logout()} className="ml-auto text-[#5a6d80]">
-            Sign out
+            {today}
+          </div>
+        </div>
+
+        <div className="order-last flex w-full items-end gap-[13px] md:order-none md:ml-auto md:w-auto">
+          <form onSubmit={onSearch} role="search" className="min-w-0 flex-1 md:w-[clamp(260px,36vw,514px)] md:flex-none">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="search"
+              aria-label="Search products or problems"
+              className="block h-[42px] w-full rounded-full bg-[#ecf0fc] px-5 font-mulish text-[16px] tracking-[-0.04em] text-[#031d4e] shadow-[0_3px_6px_rgba(3,29,78,0.12)] outline-none focus:shadow-[0_0_0_3px_rgba(192,212,239,0.7)]"
+            />
+          </form>
+          <button
+            type="button"
+            onClick={() => setPosting(true)}
+            aria-label="Issue a post"
+            className="grid h-[42px] w-[42px] shrink-0 place-items-center rounded-[8px] bg-[#c0d4ef] transition-colors hover:bg-[#adc5e8]"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="#fff" strokeWidth="3.4" strokeLinecap="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
           </button>
-        ) : (
-          <Link href="/login" className="ml-auto text-[#5a6d80]">
-            Sign in
-          </Link>
-        )}
+        </div>
+
+        {/* Same 42px height as the search bar; handles sign in / sign out */}
+        <AccountMenu />
       </div>
+
+      {posting && <PostModal onClose={() => setPosting(false)} />}
     </header>
   );
 }

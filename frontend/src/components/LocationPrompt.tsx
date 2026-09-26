@@ -33,23 +33,19 @@ export function LocationPrompt({ onChange }: { onChange: (city: string | null) =
   if (!open) return null;
 
   return (
-    <div className="card mx-auto mb-8 max-w-6xl p-5">
-      <div className="serif text-xl">Want to see what’s happening near you?</div>
-      <p className="mt-2 text-sm text-[#5a6d80]">
-        We only keep a city name, never a street address. You can skip this and still use the site.
-      </p>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <button onClick={allow} className="btn-primary px-4 py-2 text-sm">
-          Use my approximate city
-        </button>
+    <div className="card mb-8 flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
+      <div className="min-w-0 flex-1">
+        <div className="font-raleway text-[18px] font-medium tracking-[-0.04em]">see what&apos;s happening near you?</div>
+        <p className="mt-1 text-sm text-[#627290]">We only keep a city name, never an address. Skipping is fine.</p>
+      </div>
+      <div className="flex flex-wrap gap-2 text-sm">
+        <button onClick={allow} className="btn-primary px-4 py-2">Use my city</button>
         {CITIES.slice(0, 3).map((city) => (
-          <button key={city.label} onClick={() => choose(city.label)} className="btn-soft px-4 py-2 text-sm">
-            I&apos;m in {city.label}
+          <button key={city.label} onClick={() => choose(city.label)} className="btn-soft px-4 py-2">
+            {city.label}
           </button>
         ))}
-        <button onClick={() => choose(null)} className="px-4 py-2 text-sm text-[#5a6d80]">
-          Not now
-        </button>
+        <button onClick={() => choose(null)} className="px-3 py-2 text-[#627290]">Not now</button>
       </div>
     </div>
   );

@@ -41,8 +41,7 @@ export function configureAuth() {
 }
 
 export function safeNext(value: string | null | undefined) {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/report";
-  return value;
+if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";  return value;
 }
 
 export function isUnconfirmedError(err: unknown) {
