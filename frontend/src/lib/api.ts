@@ -1,12 +1,20 @@
+import { getIdToken } from "./auth";
+
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  const method = (init?.method || "GET").toUpperCase();
+  if (method !== "GET") {
+    const token = await getIdToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
   const response = await fetch(`${API}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
+    headers,
     cache: "no-store",
   });
   if (!response.ok) {
@@ -25,6 +33,8 @@ export const api = {
       `/api/products/${slug}${issue ? `?issue=${encodeURIComponent(issue)}` : ""}`,
     ),
   search: (q: string) => request<SearchResult>(`/api/search?q=${encodeURIComponent(q)}`),
+  locations: (q: string) =>
+    request<{ locations: LocationHit[] }>(`/api/locations?q=${encodeURIComponent(q)}`),
   report: (payload: Record<string, unknown>) =>
     request<{ message: string; product: import("./types").ProductDetail }>("/api/reports", {
       method: "POST",
@@ -40,10 +50,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  like: (postId: number, display_name: string) =>
+  like: (postId: number) =>
     request<{ post: import("./types").PostCard }>(`/api/posts/${postId}/likes`, {
       method: "POST",
-      body: JSON.stringify({ display_name }),
     }),
   discover: (slug: string, extra?: string) =>
     request<{
@@ -56,6 +65,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ extra, force: true }),
     }),
+};
+
+export type LocationHit = {
+  label: string;
+  latitude: number | null;
+  longitude: number | null;
+  detail: string;
 };
 
 export type SearchResult = {

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session, joinedload
 
 from ..models import Product, Recall, Report, ReportIssue
-from .cluster import cluster_strength
+from .cluster import cluster_strength_from_reports
 
 # ---------------------------------------------------------------------------
 # Signal methodology (MVP, intentionally replaceable)
@@ -51,7 +51,10 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
     now = now or datetime.utcnow()
     reports = (
         db.query(Report)
-        .options(joinedload(Report.issue_links).joinedload(ReportIssue.issue))
+        .options(
+            joinedload(Report.issue_links).joinedload(ReportIssue.issue),
+            joinedload(Report.embedding),
+        )
         .filter(Report.product_id == product.id)
         .all()
     )
@@ -83,8 +86,7 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
     geo_labels = [r.location_label for r in reports if r.location_label]
     geo_count = len(set(geo_labels))
 
-    texts = [r.text for r in reports if not r.is_duplicate]
-    semantic = cluster_strength(texts)
+    semantic = cluster_strength_from_reports([r for r in reports if not r.is_duplicate])
 
     source_div = _clamp(len(unique_sources) / 5.0)
     geo_component = _clamp(geo_count / 5.0)
@@ -126,7 +128,19 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
     issues = sorted(issue_counts.values(), key=lambda item: item["count"], reverse=True)
 
     geo_buckets = Counter(geo_labels)
-    geography = [{"label": label, "count": count} for label, count in geo_buckets.most_common(8)]
+    geo_coords: dict[str, tuple[float | None, float | None]] = {}
+    for report in reports:
+        if report.location_label and report.location_label not in geo_coords:
+            geo_coords[report.location_label] = (report.latitude, report.longitude)
+    geography = [
+        {
+            "label": label,
+            "count": count,
+            "latitude": geo_coords.get(label, (None, None))[0],
+            "longitude": geo_coords.get(label, (None, None))[1],
+        }
+        for label, count in geo_buckets.most_common(8)
+    ]
 
     velocity_display = 0
     if previous_count:

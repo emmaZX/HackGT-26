@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
+import { useAuth } from "@/lib/AuthProvider";
 import { Logo } from "./Logo";
 
 const LINKS = [
@@ -15,6 +16,7 @@ const LINKS = [
 export function Nav() {
   const pathname = usePathname();
   const router = useRouter();
+  const { user, ready, logout } = useAuth();
   const [q, setQ] = useState("");
 
   function onSearch(event: FormEvent) {
@@ -48,11 +50,30 @@ export function Nav() {
             className="field w-full max-w-md rounded-full"
           />
         </form>
-        <Link href="/report" className="btn-primary hidden px-4 py-2 text-sm md:inline">
-          Tell us what happened
-        </Link>
+        <div className="hidden shrink-0 items-center gap-3 md:flex">
+          {ready && user ? (
+            <>
+              <span className="max-w-[8rem] truncate text-sm text-[#1a365d]">{user.displayName}</span>
+              <button type="button" onClick={() => logout()} className="btn-soft px-3 py-2 text-sm">
+                Sign out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link href={`/login?next=${encodeURIComponent(pathname || "/")}`} className="text-sm text-[#5a6d80]">
+                Sign in
+              </Link>
+              <Link href="/signup" className="btn-soft px-3 py-2 text-sm">
+                Sign up
+              </Link>
+            </>
+          )}
+          <Link href="/report" className="btn-primary px-4 py-2 text-sm">
+            Tell us what happened
+          </Link>
+        </div>
       </div>
-      <div className="mx-auto flex max-w-6xl gap-4 overflow-x-auto px-5 pb-3 text-sm md:hidden">
+      <div className="mx-auto flex max-w-6xl items-center gap-4 overflow-x-auto px-5 pb-3 text-sm md:hidden">
         {LINKS.map((link) => (
           <Link
             key={link.href}
@@ -62,6 +83,15 @@ export function Nav() {
             {link.label}
           </Link>
         ))}
+        {ready && user ? (
+          <button type="button" onClick={() => logout()} className="ml-auto text-[#5a6d80]">
+            Sign out
+          </button>
+        ) : (
+          <Link href="/login" className="ml-auto text-[#5a6d80]">
+            Sign in
+          </Link>
+        )}
       </div>
     </header>
   );

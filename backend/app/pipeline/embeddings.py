@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import Embedding, Report
+from ..openai_http import openai_post
 
 TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
 STOP = {
@@ -50,35 +51,47 @@ def cosine(a: list[float], b: list[float]) -> float:
     return max(0.0, min(1.0, dot / (na * nb)))
 
 
-def embed_text(text: str) -> tuple[list[float], str]:
+def corpus_embedding_model(db: Session) -> str | None:
+    row = db.query(Embedding.model).first()
+    return row[0] if row else None
+
+
+def embed_text(text: str, *, force_model: str | None = None) -> tuple[list[float], str]:
     """
-    Prefer a hosted embedding model when a key is present.
-    Fall back to a local hashed bag-of-words so the demo never depends on a vendor.
+    Stay in one vector space. If the database already has lexical embeddings,
+    keep using those even when an OpenAI key is present.
     """
+    if force_model == "lexical-v1":
+        return lexical_vector(text), "lexical-v1"
     settings = get_settings()
-    if settings.openai_api_key:
+    want_openai = force_model not in {None, "lexical-v1"} or (
+        force_model is None and bool(settings.openai_api_key)
+    )
+    if want_openai and settings.openai_api_key:
         try:
-            return _openai_embed(text, settings.openai_api_key, settings.openai_embedding_model), settings.openai_embedding_model
+            model = force_model or settings.openai_embedding_model
+            return _openai_embed(text, settings.openai_api_key, model), model
         except Exception:
-            pass
+            if force_model and force_model != "lexical-v1":
+                raise
     return lexical_vector(text), "lexical-v1"
 
 
 def _openai_embed(text: str, api_key: str, model: str) -> list[float]:
-    import httpx
-
-    response = httpx.post(
-        "https://api.openai.com/v1/embeddings",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model, "input": text[:8000]},
+    data = openai_post(
+        "/v1/embeddings",
+        api_key,
+        {"model": model, "input": text[:8000]},
         timeout=20,
     )
-    response.raise_for_status()
-    return response.json()["data"][0]["embedding"]
+    return data["data"][0]["embedding"]
 
 
 def store_embedding(db: Session, report: Report) -> Embedding:
-    vector, model = embed_text(f"{report.title or ''} {report.text}")
+    vector, model = embed_text(
+        f"{report.title or ''} {report.text}",
+        force_model=corpus_embedding_model(db),
+    )
     existing = db.query(Embedding).filter(Embedding.report_id == report.id).one_or_none()
     payload = json.dumps(vector)
     if existing:
@@ -97,12 +110,15 @@ def load_vector(row: Embedding | None) -> list[float]:
 
 
 def similar_reports(db: Session, text: str, product_id: int | None = None, limit: int = 8) -> list[tuple[Report, float]]:
-    query_vec, _ = embed_text(text)
+    model = corpus_embedding_model(db) or "lexical-v1"
+    query_vec, _ = embed_text(text, force_model=model)
     q = db.query(Report, Embedding).join(Embedding, Embedding.report_id == Report.id)
     if product_id:
         q = q.filter(Report.product_id == product_id)
     scored: list[tuple[Report, float]] = []
     for report, embedding in q.all():
+        if embedding.model != model:
+            continue
         scored.append((report, cosine(query_vec, load_vector(embedding))))
     scored.sort(key=lambda item: item[1], reverse=True)
     return [item for item in scored if item[1] >= 0.35][:limit]
