@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     # Public location is always city-level. Stored coords are snapped to this grid.
     location_grid_decimals: int = 2
 
+    # Live bootstrap (hybrid demo path)
+    seed_demo: bool = False
+    seed_fake_posts: bool = True
+    cpsc_recall_limit: int = 25
+    home_scrape_products: int = 5
+    home_scrape_pages: int = 3
+    home_scrape_queries: int = 2
+    search_scrape_pages: int = 8
+    discovery_cooldown_minutes: int = 20
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

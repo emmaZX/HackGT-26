@@ -10,10 +10,18 @@ function SearchInner() {
   const params = useSearchParams();
   const q = params.get("q") || "";
   const [result, setResult] = useState<SearchResult | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!q) return;
-    api.search(q).then(setResult);
+    if (!q) {
+      setResult(null);
+      return;
+    }
+    setLoading(true);
+    api
+      .search(q)
+      .then(setResult)
+      .finally(() => setLoading(false));
   }, [q]);
 
   return (
@@ -23,15 +31,29 @@ function SearchInner() {
         Try a brand, a product name, or a plain-English problem like “smells like burning plastic.”
       </p>
       {!q && <p className="mt-8 text-[#5a6d80]">Type a few words in the search box above.</p>}
-      {result && (
+      {q && loading && (
+        <p className="mt-8 text-[#5a6d80]">Looking across the public web for related reports…</p>
+      )}
+      {result && !loading && (
         <div className="mt-8 grid gap-10">
+          {result.discovery && (result.discovery.ingested > 0 || result.discovery.message) && (
+            <p className="text-sm text-[#5a6d80]">
+              {result.discovery.ingested > 0
+                ? `Live discovery added ${result.discovery.ingested} public page${result.discovery.ingested === 1 ? "" : "s"} via ${result.discovery.provider || "search"}.`
+                : result.discovery.message}
+            </p>
+          )}
           <section>
             <h2 className="section-kicker mb-4">Products</h2>
-            <div className="grid gap-4 md:grid-cols-2">
-              {result.products.map((product) => (
-                <ProductCard key={product.slug} product={product} />
-              ))}
-            </div>
+            {result.products.length ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                {result.products.map((product) => (
+                  <ProductCard key={product.slug} product={product} />
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-[#5a6d80]">No matching products yet.</p>
+            )}
           </section>
           {!!result.semantic.length && (
             <section>

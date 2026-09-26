@@ -14,7 +14,7 @@ class SearchHit:
     query: str
 
 
-def niche_queries(product_name: str, extra: str | None = None) -> list[str]:
+def niche_queries(product_name: str, extra: str | None = None, max_queries: int | None = None) -> list[str]:
     base = [
         f'"{product_name}" overheating OR "burning smell" OR "burning plastic"',
         f'"{product_name}" recall OR "caught fire" OR smoke',
@@ -23,6 +23,8 @@ def niche_queries(product_name: str, extra: str | None = None) -> list[str]:
     ]
     if extra:
         base.insert(0, f"{product_name} {extra}")
+    if max_queries is not None:
+        return base[: max(1, max_queries)]
     return base
 
 
@@ -30,6 +32,7 @@ def search_web(queries: list[str], limit_per_query: int = 5) -> list[SearchHit]:
     """
     One search backend, no site-specific APIs.
     Preference order: Gemini grounding → Exa → Brave.
+    Prefer Brave when only a Brave key is set; Gemini still wins if configured.
     """
     settings = get_settings()
     hits: list[SearchHit] = []

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
-from .data_sources.page_fetch import fetch_readable
+from .config import get_settings
+from .data_sources.page_fetch import domain_of, fetch_readable
 from .data_sources.web_search import available_provider, niche_queries, search_web
 from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Report, ReportIssue, TimelineEvent
 from .pipeline.cluster import attach_and_dedupe
@@ -14,6 +15,27 @@ from .pipeline.extract import extract_report
 from .pipeline.signals import compute_signal, feed_cards
 from .security import sanitize_display_name, sanitize_text, snap_coordinate
 from .serialize import post_card, product_card, product_detail, report_card
+
+NEWS_DOMAINS = {
+    "cnn.com",
+    "bbc.com",
+    "nytimes.com",
+    "washingtonpost.com",
+    "reuters.com",
+    "apnews.com",
+    "nbcnews.com",
+    "cbsnews.com",
+    "abcnews.go.com",
+    "theguardian.com",
+    "npr.org",
+    "usatoday.com",
+    "bloomberg.com",
+    "forbes.com",
+    "consumerreports.org",
+    "cnet.com",
+    "wired.com",
+    "techcrunch.com",
+}
 
 
 def get_product(db: Session, slug: str) -> Product | None:
@@ -88,10 +110,11 @@ def product_payload(db: Session, product: Product, issue_slug: str | None = None
     return payload
 
 
-def search_catalog(db: Session, query: str) -> dict:
+def search_catalog(db: Session, query: str, live: bool = True) -> dict:
+    settings = get_settings()
     q = sanitize_text(query, 200)
     if not q:
-        return {"query": q, "products": [], "reports": [], "semantic": []}
+        return {"query": q, "products": [], "reports": [], "semantic": [], "discovery": None}
 
     like = f"%{q}%"
     products = (
@@ -103,6 +126,7 @@ def search_catalog(db: Session, query: str) -> dict:
                 Product.model.ilike(like),
                 Product.category.ilike(like),
                 Product.upc.ilike(like),
+                Product.summary.ilike(like),
             )
         )
         .all()
@@ -128,12 +152,52 @@ def search_catalog(db: Session, query: str) -> dict:
         )
         card["score"] = max(card["score"], score)
 
+    discovery = None
+    if live and available_provider() and len(q) >= 3:
+        if products:
+            target = products[0]
+            web_count = (
+                db.query(Report)
+                .filter(
+                    Report.product_id == target.id,
+                    Report.source.in_(("web", "reddit", "news")),
+                )
+                .count()
+            )
+            if web_count < 4:
+                discovery = run_discovery(
+                    db,
+                    target.slug,
+                    extra=q,
+                    max_pages=settings.search_scrape_pages,
+                    force=False,
+                )
+                refreshed = get_product(db, target.slug)
+                if refreshed:
+                    products = [refreshed] + [p for p in products if p.id != target.id]
+        else:
+            discovery = discover_from_query(db, q)
+            if discovery.get("product"):
+                slug = discovery["product"]["slug"]
+                found = get_product(db, slug)
+                if found:
+                    products = [found]
+
     product_cards = [product_card(product, compute_signal(db, product)) for product in products]
-    # Merge semantic hits that keyword search missed.
     seen = {card["id"] for card in product_cards}
     for item in semantic_products.values():
         if item["product"]["id"] not in seen:
             product_cards.append(item["product"])
+
+    if discovery and discovery.get("ingested"):
+        reports = (
+            db.query(Report)
+            .options(joinedload(Report.product), joinedload(Report.issue_links).joinedload(ReportIssue.issue))
+            .filter(or_(Report.text.ilike(like), Report.title.ilike(like)))
+            .order_by(Report.created_at.desc())
+            .limit(20)
+            .all()
+        )
 
     return {
         "query": q,
@@ -143,7 +207,46 @@ def search_catalog(db: Session, query: str) -> dict:
             for report in reports
         ],
         "semantic": sorted(semantic_products.values(), key=lambda item: item["score"], reverse=True),
+        "discovery": {
+            "provider": discovery.get("provider") if discovery else None,
+            "ingested": discovery.get("ingested", 0) if discovery else 0,
+            "message": discovery.get("message") if discovery else None,
+            "skipped": discovery.get("skipped") if discovery else None,
+        }
+        if discovery
+        else None,
     }
+
+
+def discover_from_query(db: Session, query: str) -> dict:
+    """Cold-path search: create a product from the query and scrape the public web."""
+    provider = available_provider()
+    if not provider:
+        return {"provider": None, "ingested": 0, "message": "No search API key configured.", "product": None}
+
+    settings = get_settings()
+    product = _resolve_product(
+        db,
+        {
+            "product_name": query.title() if len(query) < 80 else query[:80].title(),
+            "brand": "Search",
+            "category": "Discovered",
+            "summary": f"Created from search for “{query}”.",
+        },
+    )
+    product.summary = product.summary or f"Created from search for “{query}”."
+    db.commit()
+
+    result = run_discovery(
+        db,
+        product.slug,
+        extra=query,
+        max_pages=settings.search_scrape_pages,
+        max_queries=3,
+        force=True,
+    )
+    result["product"] = product_card(product, compute_signal(db, product))
+    return result
 
 
 def create_user_report(db: Session, payload: dict) -> dict:
@@ -290,7 +393,15 @@ def toggle_like(db: Session, post_id: int, display_name: str) -> dict:
     return {"post": post_card(post)}
 
 
-def run_discovery(db: Session, product_slug: str, extra: str | None = None) -> dict:
+def run_discovery(
+    db: Session,
+    product_slug: str,
+    extra: str | None = None,
+    max_pages: int | None = None,
+    max_queries: int | None = None,
+    force: bool = False,
+) -> dict:
+    settings = get_settings()
     product = get_product(db, product_slug)
     if not product:
         raise ValueError("Unknown product")
@@ -298,28 +409,50 @@ def run_discovery(db: Session, product_slug: str, extra: str | None = None) -> d
     if not provider:
         return {
             "provider": None,
-            "message": "No search API key is configured. Seeded evidence is still available. Add GEMINI_API_KEY, EXA_API_KEY, or BRAVE_SEARCH_API_KEY to enable live discovery.",
+            "message": (
+                "No search API key is configured. Add BRAVE_SEARCH_API_KEY "
+                "(or GEMINI_API_KEY / EXA_API_KEY) to enable live discovery."
+            ),
             "hits": [],
             "ingested": 0,
+            "skipped": False,
         }
-    queries = niche_queries(f"{product.brand} {product.name}", extra)
+
+    if not force and _discovery_on_cooldown(db, product.id, settings.discovery_cooldown_minutes):
+        return {
+            "provider": provider,
+            "message": "Discovery recently ran for this product; skipped to save search quota.",
+            "hits": [],
+            "ingested": 0,
+            "skipped": True,
+            "product": product_payload(db, product),
+        }
+
+    page_cap = max_pages if max_pages is not None else settings.search_scrape_pages
+    queries = niche_queries(f"{product.brand} {product.name}", extra, max_queries=max_queries)
     hits = search_web(queries)
     ingested = 0
-    notes = []
-    for hit in hits[:8]:
+    notes: list[str] = []
+    for hit in hits[:page_cap]:
+        url_key = _normalize_url(hit.url)
+        if _url_already_ingested(db, product.id, url_key):
+            notes.append(f"dup {hit.url}")
+            continue
         try:
             page = fetch_readable(hit.url)
         except Exception as exc:
             notes.append(f"skipped {hit.url}: {exc.__class__.__name__}")
             continue
         if len(page["text"]) < 40:
+            notes.append(f"thin {hit.url}")
             continue
         extracted = extract_report(page["text"], f"{product.brand} {product.name}")
+        source = _source_label(page["url"] or hit.url)
         report = Report(
             product_id=product.id,
-            source="web",
-            source_id=hit.url,
-            source_url=page["url"],
+            source=source,
+            source_id=url_key[:240],
+            source_url=(page["url"] or hit.url)[:700],
             title=page["title"],
             text=page["text"][:4000],
             excerpt=(hit.snippet or page["text"])[:220],
@@ -343,11 +476,57 @@ def run_discovery(db: Session, product_slug: str, extra: str | None = None) -> d
     return {
         "provider": provider,
         "queries": queries,
-        "hits": [{"title": hit.title, "url": hit.url, "snippet": hit.snippet, "query": hit.query} for hit in hits],
+        "hits": [
+            {"title": hit.title, "url": hit.url, "snippet": hit.snippet, "query": hit.query} for hit in hits
+        ],
         "ingested": ingested,
         "notes": notes,
+        "skipped": False,
         "product": product_payload(db, product),
     }
+
+
+def _discovery_on_cooldown(db: Session, product_id: int, minutes: int) -> bool:
+    if minutes <= 0:
+        return False
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    latest = (
+        db.query(DiscoveryRun)
+        .filter(DiscoveryRun.product_id == product_id, DiscoveryRun.created_at >= cutoff)
+        .order_by(DiscoveryRun.created_at.desc())
+        .first()
+    )
+    return latest is not None
+
+
+def _normalize_url(url: str) -> str:
+    return (url or "").split("#")[0].rstrip("/")
+
+
+def _url_already_ingested(db: Session, product_id: int, url_key: str) -> bool:
+    if not url_key:
+        return False
+    return (
+        db.query(Report)
+        .filter(
+            Report.product_id == product_id,
+            or_(Report.source_url == url_key, Report.source_id == url_key[:240]),
+        )
+        .count()
+        > 0
+    )
+
+
+def _source_label(url: str) -> str:
+    host = domain_of(url)
+    host = host[4:] if host.startswith("www.") else host
+    if "reddit.com" in host:
+        return "reddit"
+    if any(host == domain or host.endswith("." + domain) for domain in NEWS_DOMAINS):
+        return "news"
+    if "cpsc.gov" in host or "saferproducts.gov" in host:
+        return "cpsc"
+    return "web"
 
 
 def _resolve_product(db: Session, payload: dict) -> Product:
@@ -370,7 +549,7 @@ def _resolve_product(db: Session, payload: dict) -> Product:
         model=sanitize_text(payload.get("model") or "", 80) or None,
         category=sanitize_text(payload.get("category") or "Uncategorized", 80),
         upc=sanitize_text(payload.get("upc") or "", 32) or None,
-        summary="Created from a community report.",
+        summary=sanitize_text(payload.get("summary") or "Created from a community report.", 500),
     )
     db.add(product)
     db.flush()

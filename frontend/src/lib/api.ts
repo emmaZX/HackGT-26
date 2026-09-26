@@ -57,4 +57,10 @@ export type SearchResult = {
   products: import("./types").ProductCard[];
   reports: import("./types").ReportCard[];
   semantic: { product: import("./types").ProductCard; score: number; matched_excerpt: string }[];
+  discovery?: {
+    provider: string | null;
+    ingested: number;
+    message?: string | null;
+    skipped?: boolean | null;
+  } | null;
 };

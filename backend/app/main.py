@@ -5,11 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from .bootstrap import bootstrap_from_cpsc, start_home_scrape_background
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .models import Product
 from .pipeline.signals import compute_signal
-from .seed import seed_if_empty
 from .serialize import product_card
 from .services import (
     add_comment,
@@ -26,8 +26,12 @@ from .services import (
 settings = get_settings()
 Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 Base.metadata.create_all(bind=engine)
+
 with SessionLocal() as session:
-    seed_if_empty(session)
+    home_products = bootstrap_from_cpsc(session)
+    home_slugs = [product.slug for product in home_products]
+
+start_home_scrape_background(home_slugs)
 
 app = FastAPI(title="Recall Me Maybe", version="0.1.0", docs_url="/docs")
 app.add_middleware(
@@ -77,6 +81,7 @@ class LikeIn(BaseModel):
 
 class DiscoverIn(BaseModel):
     extra: str | None = None
+    force: bool = False
 
 
 @app.get("/health")
@@ -104,8 +109,8 @@ def product(slug: str, issue: str | None = None, db: Session = Depends(get_db)):
 
 
 @app.get("/api/search")
-def search(q: str = "", db: Session = Depends(get_db)):
-    return search_catalog(db, q)
+def search(q: str = "", live: bool = True, db: Session = Depends(get_db)):
+    return search_catalog(db, q, live=live)
 
 
 @app.post("/api/reports")
@@ -143,6 +148,11 @@ def likes(post_id: int, payload: LikeIn, db: Session = Depends(get_db)):
 @app.post("/api/products/{slug}/discover")
 def discover(slug: str, payload: DiscoverIn | None = None, db: Session = Depends(get_db)):
     try:
-        return run_discovery(db, slug, extra=(payload.extra if payload else None))
+        return run_discovery(
+            db,
+            slug,
+            extra=(payload.extra if payload else None),
+            force=(payload.force if payload else False),
+        )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
