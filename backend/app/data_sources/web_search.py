@@ -14,13 +14,33 @@ class SearchHit:
     query: str
 
 
-def niche_queries(product_name: str, extra: str | None = None, max_queries: int | None = None) -> list[str]:
-    base = [
-        f'"{product_name}" overheating OR "burning smell" OR "burning plastic"',
-        f'"{product_name}" recall OR "caught fire" OR smoke',
-        f'"{product_name}" "stopped working" OR shutdown OR "turned itself off"',
-        f"{product_name} site:reddit.com problem OR issue OR dangerous",
-    ]
+def niche_queries(
+    product_name: str,
+    extra: str | None = None,
+    max_queries: int | None = None,
+    category: str | None = None,
+) -> list[str]:
+    """Build search queries. Food recalls get pathogen/outbreak queries; physical products only when searched."""
+    is_food = (category or "").lower() in {"food", "beverage", "produce", "dairy"} or _looks_like_food(
+        product_name, extra
+    )
+    if is_food:
+        # Unofficial complaint sources first — never lead with "recall" (pulls regulator press).
+        base = [
+            f'{product_name} site:reddit.com (sick OR vomiting OR diarrhea OR "food poisoning" OR nauseous)',
+            f'site:iwaspoisoned.com {product_name}',
+            f'{product_name} (site:reddit.com OR site:iwaspoisoned.com OR site:facebook.com) (sick OR illness)',
+            f'"{product_name}" (reddit OR "i was poisoned" OR nextdoor OR discord) (vomiting OR diarrhea OR "got sick")',
+            f'"{product_name}" ("threw up" OR "food poisoning" OR "whole family") -site:fda.gov -site:cdc.gov -recall',
+        ]
+    else:
+        # Physical / appliance queries — only used when a specific non-food product is searched.
+        base = [
+            f'"{product_name}" site:reddit.com overheating OR "burning smell" OR problem',
+            f'"{product_name}" overheating OR "burning smell" OR "burning plastic"',
+            f'"{product_name}" recall OR "caught fire" OR smoke -site:cpsc.gov',
+            f'"{product_name}" "stopped working" OR shutdown OR dangerous',
+        ]
     if extra:
         base.insert(0, f"{product_name} {extra}")
     if max_queries is not None:
@@ -28,39 +48,80 @@ def niche_queries(product_name: str, extra: str | None = None, max_queries: int 
     return base
 
 
+def _looks_like_food(product_name: str, extra: str | None) -> bool:
+    text = f"{product_name} {extra or ''}".lower()
+    needles = (
+        "lettuce",
+        "romaine",
+        "spinach",
+        "cheese",
+        "milk",
+        "yogurt",
+        "chicken",
+        "beef",
+        "fish",
+        "salmon",
+        "ice cream",
+        "chocolate",
+        "snack",
+        "chips",
+        "sauce",
+        "soup",
+        "bread",
+        "egg",
+        "produce",
+        "food",
+        "cyclospora",
+        "listeria",
+        "salmonella",
+    )
+    return any(n in text for n in needles)
+
+
 def search_web(queries: list[str], limit_per_query: int = 5) -> list[SearchHit]:
     """
     One search backend, no site-specific APIs.
-    Preference order: Gemini grounding → Exa → Brave.
-    Prefer Brave when only a Brave key is set; Gemini still wins if configured.
+    Preference order: Exa → Brave → Gemini (Exa first for niche semantic search).
+    Falls through when a configured provider errors or returns no hits.
     """
     settings = get_settings()
-    hits: list[SearchHit] = []
+    providers = []
+    if settings.exa_api_key:
+        providers.append(("exa", lambda: _exa_search(queries, settings, limit_per_query)))
+    if settings.brave_search_api_key:
+        providers.append(("brave", lambda: _brave_search(queries, settings, limit_per_query)))
     if settings.gemini_api_key:
-        hits = _gemini_search(queries, settings)
-    elif settings.exa_api_key:
-        hits = _exa_search(queries, settings, limit_per_query)
-    elif settings.brave_search_api_key:
-        hits = _brave_search(queries, settings, limit_per_query)
-    return _dedupe_hits(hits)
+        providers.append(("gemini", lambda: _gemini_search(queries, settings)))
+
+    for name, runner in providers:
+        try:
+            hits = runner()
+        except Exception:
+            continue
+        if hits:
+            return _dedupe_hits(hits)
+    return []
 
 
 def available_provider() -> str | None:
     settings = get_settings()
-    if settings.gemini_api_key:
-        return "gemini"
     if settings.exa_api_key:
         return "exa"
     if settings.brave_search_api_key:
         return "brave"
+    if settings.gemini_api_key:
+        return "gemini"
     return None
 
 
 def _gemini_search(queries: list[str], settings) -> list[SearchHit]:
     import httpx
+    import time
 
     hits: list[SearchHit] = []
-    for query in queries:
+    for index, query in enumerate(queries):
+        if index:
+            time.sleep(2)  # be gentle on free-tier RPM
         prompt = (
             "Find recent public web pages where people report problems with this query. "
             "Return a JSON list of {title, url, snippet}. Only include pages that actually exist. "
@@ -68,14 +129,23 @@ def _gemini_search(queries: list[str], settings) -> list[SearchHit]:
         )
         response = httpx.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-            params={"key": settings.gemini_api_key},
+            headers={"x-goog-api-key": settings.gemini_api_key},
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "tools": [{"google_search": {}}],
             },
             timeout=40,
         )
-        response.raise_for_status()
+        if response.status_code == 429:
+            # Don't burn retries on free tier — return whatever we have.
+            break
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                detail = (response.json().get("error") or {}).get("message") or ""
+            except Exception:
+                detail = response.text[:160]
+            raise RuntimeError(f"Gemini search failed ({response.status_code}): {detail[:160]}")
         data = response.json()
         for candidate in data.get("candidates", []):
             grounding = candidate.get("groundingMetadata", {})
@@ -110,26 +180,65 @@ def _gemini_search(queries: list[str], settings) -> list[SearchHit]:
 
 def _exa_search(queries: list[str], settings, limit: int) -> list[SearchHit]:
     import httpx
+    from datetime import datetime, timedelta, timezone
+
+    start = (
+        datetime.now(timezone.utc) - timedelta(days=max(1, settings.discovery_recency_days))
+    ).strftime("%Y-%m-%dT00:00:00.000Z")
+
+    preferred_domains = [
+        "reddit.com",
+        "iwaspoisoned.com",
+        "facebook.com",
+        "nextdoor.com",
+    ]
 
     hits: list[SearchHit] = []
     for query in queries:
-        response = httpx.post(
-            "https://api.exa.ai/search",
-            headers={"x-api-key": settings.exa_api_key},
-            json={"query": query, "numResults": limit, "type": "auto", "contents": {"text": False}},
-            timeout=25,
-        )
-        response.raise_for_status()
-        for item in response.json().get("results", []):
-            hits.append(
-                SearchHit(
-                    title=item.get("title") or item.get("url"),
-                    url=item["url"],
-                    snippet=(item.get("text") or "")[:280],
-                    provider="exa",
-                    query=query,
+        payloads = [
+            {
+                "query": query,
+                "numResults": limit,
+                "type": "auto",
+                "contents": {"text": False},
+                "startPublishedDate": start,
+                "includeDomains": preferred_domains,
+            },
+            {
+                "query": query,
+                "numResults": limit,
+                "type": "auto",
+                "contents": {"text": False},
+                "startPublishedDate": start,
+            },
+        ]
+        # Query already pins a site — skip the includeDomains pass.
+        if "site:" in query.lower():
+            payloads = payloads[1:]
+        for payload in payloads:
+            try:
+                response = httpx.post(
+                    "https://api.exa.ai/search",
+                    headers={"x-api-key": settings.exa_api_key},
+                    json=payload,
+                    timeout=25,
                 )
-            )
+                response.raise_for_status()
+            except Exception:
+                continue
+            batch = response.json().get("results", [])
+            for item in batch:
+                hits.append(
+                    SearchHit(
+                        title=item.get("title") or item.get("url"),
+                        url=item["url"],
+                        snippet=(item.get("text") or "")[:280],
+                        provider="exa",
+                        query=query,
+                    )
+                )
+            if batch:
+                break
     return hits
 
 

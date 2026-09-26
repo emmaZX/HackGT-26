@@ -17,6 +17,12 @@ ISSUE_PATTERNS: list[tuple[str, str, list[str]]] = [
     ("shock", "electrical", ["shocked", "electric shock", "sparked", "spark"]),
     ("leak", "containment failure", ["leak", "leaking", "spilled"]),
     ("fire", "possible fire risk", ["caught fire", "on fire", "flames"]),
+    ("salmonella", "foodborne illness", ["salmonella"]),
+    ("listeria", "foodborne illness", ["listeria"]),
+    ("e. coli", "foodborne illness", ["e. coli", "e coli", "escherichia"]),
+    ("cyclospora", "foodborne illness", ["cyclospora"]),
+    ("undeclared allergen", "allergen risk", ["undeclared", "allergen", "allergic"]),
+    ("food contamination", "food safety", ["contaminated", "contamination", "do not eat", "throw away", "food poisoning", "outbreak"]),
 ]
 
 
@@ -65,10 +71,12 @@ def _gemini_extract(text: str, product_hint: str | None, api_key: str, model: st
     )
     response = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        params={"key": api_key},
+        headers={"x-goog-api-key": api_key},
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=30,
     )
+    if response.status_code == 429:
+        raise RuntimeError("Gemini rate limited")
     response.raise_for_status()
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     match = re.search(r"\{.*\}", raw, re.S)

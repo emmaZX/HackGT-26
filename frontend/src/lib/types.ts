@@ -27,6 +27,8 @@ export type Signal = {
     hazard: string;
     source_url: string;
     nationwide: boolean;
+    status?: string;
+    phase?: "ongoing" | "past" | string;
   } | null;
   components: Record<string, number>;
 };

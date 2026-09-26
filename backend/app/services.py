@@ -6,9 +6,9 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from .config import get_settings
-from .data_sources.page_fetch import domain_of, fetch_readable
-from .data_sources.web_search import available_provider, niche_queries, search_web
-from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Report, ReportIssue, TimelineEvent
+from .data_sources.page_fetch import domain_of
+from .data_sources.web_search import available_provider
+from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Recall, Report, ReportIssue, TimelineEvent
 from .pipeline.cluster import attach_and_dedupe
 from .pipeline.embeddings import similar_reports
 from .pipeline.extract import extract_report
@@ -68,8 +68,8 @@ def list_feed(db: Session, city: str | None = None) -> dict:
         ],
         "visitor_city": city,
         "disclaimer": (
-            "Community signals are not proof that a product is unsafe. "
-            "They identify patterns worth investigating."
+            "Early internet clusters are a heads-up, not a verdict. "
+            "Official recalls stay official. The point is seeing the pattern before — or without — an FDA page."
         ),
     }
 
@@ -219,22 +219,29 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
 
 
 def discover_from_query(db: Session, query: str) -> dict:
-    """Cold-path search: create a product from the query and scrape the public web."""
+    """Cold-path search: create a product from the query and scrape the public web.
+
+    Food-ish queries become Food products. Specific physical product queries
+    (heater, blender, etc.) are allowed here only — they are not home-bootstrapped.
+    """
     provider = available_provider()
     if not provider:
         return {"provider": None, "ingested": 0, "message": "No search API key configured.", "product": None}
 
     settings = get_settings()
+    foodish = _query_looks_like_food(query)
     product = _resolve_product(
         db,
         {
             "product_name": query.title() if len(query) < 80 else query[:80].title(),
             "brand": "Search",
-            "category": "Discovered",
+            "category": "Food" if foodish else "Physical",
             "summary": f"Created from search for “{query}”.",
         },
     )
     product.summary = product.summary or f"Created from search for “{query}”."
+    if foodish:
+        product.category = "Food"
     db.commit()
 
     result = run_discovery(
@@ -247,6 +254,61 @@ def discover_from_query(db: Session, query: str) -> dict:
     )
     result["product"] = product_card(product, compute_signal(db, product))
     return result
+
+
+def _query_looks_like_food(query: str) -> bool:
+    text = query.lower()
+    food_needles = (
+        "lettuce",
+        "romaine",
+        "spinach",
+        "cheese",
+        "milk",
+        "yogurt",
+        "chicken",
+        "beef",
+        "fish",
+        "salmon",
+        "ice cream",
+        "chocolate",
+        "chips",
+        "sauce",
+        "soup",
+        "bread",
+        "egg",
+        "produce",
+        "food",
+        "cyclospora",
+        "listeria",
+        "salmonella",
+        "e. coli",
+        "ecoli",
+        "outbreak",
+        "contaminated",
+        "allergen",
+        "undeclared",
+    )
+    physical_needles = (
+        "heater",
+        "blender",
+        "purifier",
+        "headphones",
+        "monitor",
+        "cooker",
+        "blanket",
+        "lamp",
+        "bottle",
+        "charger",
+        "battery",
+        "overheat",
+        "burning plastic",
+    )
+    if any(n in text for n in physical_needles) and not any(n in text for n in food_needles):
+        return False
+    if any(n in text for n in food_needles):
+        return True
+    # Default cold search toward food for this product's demo focus.
+    return True
 
 
 def create_user_report(db: Session, payload: dict) -> dict:
@@ -410,8 +472,8 @@ def run_discovery(
         return {
             "provider": None,
             "message": (
-                "No search API key is configured. Add BRAVE_SEARCH_API_KEY "
-                "(or GEMINI_API_KEY / EXA_API_KEY) to enable live discovery."
+                "No search API key is configured. Add EXA_API_KEY "
+                "(or BRAVE_SEARCH_API_KEY / GEMINI_API_KEY) to enable live discovery."
             ),
             "hits": [],
             "ingested": 0,
@@ -429,50 +491,127 @@ def run_discovery(
         }
 
     page_cap = max_pages if max_pages is not None else settings.search_scrape_pages
-    queries = niche_queries(f"{product.brand} {product.name}", extra, max_queries=max_queries)
-    hits = search_web(queries)
+    official = (
+        db.query(Recall)
+        .filter(Recall.product_id == product.id, Recall.official.is_(True))
+        .order_by(Recall.recall_date.desc())
+        .first()
+    )
+
+    from .agents import run_agent_pipeline
+
+    pipeline = run_agent_pipeline(
+        product=product,
+        extra=extra,
+        max_pages=page_cap,
+        max_queries=max_queries,
+        already_ingested=lambda url: _url_already_ingested(db, product.id, _normalize_url(url)),
+        is_ingestible=_is_ingestible_url,
+        is_agency=_is_agency_host,
+        rank_url=_human_source_rank,
+        official_recall=official,
+    )
+    provider = pipeline.get("provider")
+    if not provider:
+        return {
+            "provider": None,
+            "message": (
+                "No search API key is configured. Add EXA_API_KEY "
+                "(or BRAVE_SEARCH_API_KEY / GEMINI_API_KEY) to enable live discovery."
+            ),
+            "hits": [],
+            "ingested": 0,
+            "skipped": False,
+            "agent_log": pipeline.get("agent_log") or [],
+        }
+
+    queries = pipeline.get("queries") or []
+    hits = pipeline.get("hits") or []
+    notes = list(pipeline.get("notes") or [])
     ingested = 0
-    notes: list[str] = []
-    for hit in hits[:page_cap]:
-        url_key = _normalize_url(hit.url)
+    findings: list[dict] = []
+
+    for item in pipeline.get("candidates") or []:
+        final_url = item["final_url"]
+        url_key = _normalize_url(final_url)
         if _url_already_ingested(db, product.id, url_key):
-            notes.append(f"dup {hit.url}")
+            notes.append(f"dup {final_url}")
             continue
-        try:
-            page = fetch_readable(hit.url)
-        except Exception as exc:
-            notes.append(f"skipped {hit.url}: {exc.__class__.__name__}")
-            continue
-        if len(page["text"]) < 40:
-            notes.append(f"thin {hit.url}")
-            continue
-        extracted = extract_report(page["text"], f"{product.brand} {product.name}")
-        source = _source_label(page["url"] or hit.url)
+        extracted = extract_report(item["text"], f"{product.brand} {product.name}")
+        source = _source_label(final_url)
+        geo = item.get("geo") or {}
+        triage = item.get("triage") or {}
+        excerpt = (item.get("snippet") or item["text"])[:220]
+        if triage.get("label"):
+            excerpt = f"[{triage.get('label')}] {excerpt}"[:220]
         report = Report(
             product_id=product.id,
             source=source,
             source_id=url_key[:240],
-            source_url=(page["url"] or hit.url)[:700],
-            title=page["title"],
-            text=page["text"][:4000],
-            excerpt=(hit.snippet or page["text"])[:220],
+            source_url=final_url[:700],
+            title=item.get("title"),
+            text=item["text"][:4000],
+            excerpt=excerpt,
             is_user_generated=False,
+            location_label=geo.get("location_label"),
+            location_precision=geo.get("location_precision") or "none",
+            location_source=geo.get("location_source") or "none",
         )
         db.add(report)
         db.flush()
         _apply_issues(db, report, extracted)
         attach_and_dedupe(db, report)
         ingested += 1
+        findings.append(
+            {
+                "title": item.get("title") or final_url,
+                "url": final_url,
+                "host": item.get("host") or domain_of(final_url),
+                "source": source,
+                "triage": triage.get("label"),
+            }
+        )
+
+    # Confirm official status when triage saw recall coverage.
+    coverage = pipeline.get("recall_coverage") or []
+    if coverage:
+        from .bootstrap import ensure_recall_from_discovery
+
+        if ensure_recall_from_discovery(db, product, coverage):
+            notes.append("openfda:recall-attached-from-coverage")
+        else:
+            notes.append("openfda:coverage-unconfirmed")
+
+    agent_bits = []
+    for step in pipeline.get("agent_log") or []:
+        name = step.get("agent")
+        if "queries" in step:
+            agent_bits.append(f"{name}:{len(step['queries'])}q")
+        elif "hit_count" in step:
+            agent_bits.append(f"{name}:{step['hit_count']}hits")
+        elif "fetched" in step:
+            agent_bits.append(f"{name}:{step['fetched']}pages")
+        elif "kept" in step:
+            agent_bits.append(
+                f"{name}:kept{step['kept']}/cov{step.get('coverage', 0)}/rej{step.get('rejected', 0)}"
+            )
+        elif "located" in step:
+            agent_bits.append(f"{name}:{step['located']}geo")
+    agent_summary = ", ".join(agent_bits)
     db.add(
         DiscoveryRun(
             product_id=product.id,
-            query=" | ".join(queries),
-            provider=provider,
+            query=" | ".join(queries)[:900],
+            provider=f"agents:{provider}",
             result_count=len(hits),
-            notes="; ".join(notes)[:1000],
+            notes=(agent_summary + " | " + "; ".join(notes))[:1000],
         )
     )
     db.commit()
+    if ingested and settings.seed_fake_posts:
+        from .bootstrap import seed_posts_from_ingest
+
+        seed_posts_from_ingest(db, product, findings)
     return {
         "provider": provider,
         "queries": queries,
@@ -482,6 +621,7 @@ def run_discovery(
         "ingested": ingested,
         "notes": notes,
         "skipped": False,
+        "agent_log": pipeline.get("agent_log") or [],
         "product": product_payload(db, product),
     }
 
@@ -503,6 +643,65 @@ def _normalize_url(url: str) -> str:
     return (url or "").split("#")[0].rstrip("/")
 
 
+def _is_ingestible_url(url: str | None) -> bool:
+    if not url:
+        return False
+    lowered = url.strip().lower()
+    if not (lowered.startswith("http://") or lowered.startswith("https://")):
+        return False
+    host = domain_of(url)
+    if not host or host == "example.com" or host.endswith(".example.com"):
+        return False
+    return True
+
+
+def _is_agency_host(url: str | None) -> bool:
+    host = domain_of(url or "")
+    host = host[4:] if host.startswith("www.") else host
+    needles = (
+        "cdc.gov",
+        "fda.gov",
+        "accessdata.fda.gov",
+        "fsis.usda.gov",
+        "canada.ca",
+        "foodsafety.gov",
+        "who.int",
+        "fsai.ie",
+        "food.gov.uk",
+        "inspection.gc.ca",
+        "efsa.europa.eu",
+    )
+    return any(host == n or host.endswith("." + n) for n in needles)
+
+
+def _human_source_rank(url: str) -> int:
+    """Lower is better — Reddit / iWasPoisoned / social first; agency last."""
+    host = domain_of(url or "")
+    host = host[4:] if host.startswith("www.") else host
+    if "reddit.com" in host or host.endswith(".reddit.com"):
+        return 0
+    if "iwaspoisoned.com" in host:
+        return 0
+    if any(
+        x in host
+        for x in (
+            "facebook.com",
+            "nextdoor.com",
+            "discord.com",
+            "tiktok.com",
+            "x.com",
+            "twitter.com",
+            "threads.net",
+        )
+    ):
+        return 1
+    if _is_agency_host(url):
+        return 9
+    if any(host == d or host.endswith("." + d) for d in NEWS_DOMAINS):
+        return 4
+    return 3
+
+
 def _url_already_ingested(db: Session, product_id: int, url_key: str) -> bool:
     if not url_key:
         return False
@@ -522,10 +721,14 @@ def _source_label(url: str) -> str:
     host = host[4:] if host.startswith("www.") else host
     if "reddit.com" in host:
         return "reddit"
+    if "iwaspoisoned.com" in host:
+        return "web"
     if any(host == domain or host.endswith("." + domain) for domain in NEWS_DOMAINS):
         return "news"
     if "cpsc.gov" in host or "saferproducts.gov" in host:
         return "cpsc"
+    if "fda.gov" in host or "accessdata.fda.gov" in host:
+        return "fda"
     return "web"
 
 

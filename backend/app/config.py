@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/signal.db"
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.8-flash"
     exa_api_key: str = ""
     brave_search_api_key: str = ""
     openai_api_key: str = ""
@@ -40,11 +40,15 @@ class Settings(BaseSettings):
     seed_demo: bool = False
     seed_fake_posts: bool = True
     cpsc_recall_limit: int = 25
-    home_scrape_products: int = 5
+    fda_food_recall_limit: int = 25
+    # Light home scrape — keep Exa/Brave credit burn low.
+    home_scrape_products: int = 2
     home_scrape_pages: int = 3
-    home_scrape_queries: int = 2
-    search_scrape_pages: int = 8
+    home_scrape_queries: int = 1
+    search_scrape_pages: int = 5
     discovery_cooldown_minutes: int = 20
+    # Prefer recent complaints / Ongoing notices (days).
+    discovery_recency_days: int = 90
 
     @property
     def cors_origin_list(self) -> list[str]:

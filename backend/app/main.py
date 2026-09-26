@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .bootstrap import bootstrap_from_cpsc, start_home_scrape_background
+from .bootstrap import bootstrap_catalog, start_home_scrape_background
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .models import Product
@@ -28,7 +28,7 @@ Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 Base.metadata.create_all(bind=engine)
 
 with SessionLocal() as session:
-    home_products = bootstrap_from_cpsc(session)
+    home_products = bootstrap_catalog(session)
     home_slugs = [product.slug for product in home_products]
 
 start_home_scrape_background(home_slugs)
@@ -86,7 +86,14 @@ class DiscoverIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "app": settings.app_name, "live_search": settings.has_live_search()}
+    from .data_sources.web_search import available_provider
+
+    return {
+        "ok": True,
+        "app": settings.app_name,
+        "live_search": settings.has_live_search(),
+        "search_provider": available_provider(),
+    }
 
 
 @app.get("/api/feed")

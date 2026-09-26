@@ -46,10 +46,16 @@ export const api = {
       body: JSON.stringify({ display_name }),
     }),
   discover: (slug: string, extra?: string) =>
-    request<{ provider: string | null; message?: string; ingested: number; queries?: string[] }>(
-      `/api/products/${slug}/discover`,
-      { method: "POST", body: JSON.stringify({ extra }) },
-    ),
+    request<{
+      provider: string | null;
+      message?: string;
+      ingested: number;
+      queries?: string[];
+      agent_log?: { agent: string; [key: string]: unknown }[];
+    }>(`/api/products/${slug}/discover`, {
+      method: "POST",
+      body: JSON.stringify({ extra, force: true }),
+    }),
 };
 
 export type SearchResult = {

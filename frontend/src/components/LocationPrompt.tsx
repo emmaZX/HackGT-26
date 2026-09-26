@@ -7,9 +7,9 @@ export function LocationPrompt({ onChange }: { onChange: (city: string | null) =
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    onChange(getCity());
+    // Parent owns the initial city read — only open the prompt when needed.
     if (!locationPromptSeen()) setOpen(true);
-  }, [onChange]);
+  }, []);
 
   function choose(city: string | null) {
     setCity(city);

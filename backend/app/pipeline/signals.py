@@ -107,7 +107,13 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
     strength = _clamp(strength * (0.55 + 0.45 * independence_component))
 
     key, title = _label_for(strength)
-    official = recalls[0] if recalls else None
+    # Prefer Ongoing openFDA notices only — never surface terminated history.
+    ongoing = [
+        r
+        for r in recalls
+        if (r.reason or "").lower().startswith("[ongoing]")
+    ]
+    official = ongoing[0] if ongoing else None
 
     issue_counts: dict[str, dict] = {}
     for report in reports:
@@ -137,12 +143,31 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
         geo_count=geo_count,
         issues=issues,
         official=official,
+        internet_before_official=False,
     )
 
+    internet_before_official = False
+    if official and reports:
+        internet_before_official = any(r.created_at.date() < official.recall_date.date() for r in reports)
+        if internet_before_official:
+            why = (
+                f"Public and community reports were already clustering before the "
+                f"{official.agency} notice on {official.recall_date.date().isoformat()}. "
+                f"About {int(round(independent))} independent-looking reports describe "
+                f"{(issues[0]['name'] if issues else 'the same problem').lower()}. "
+                "Official recall status is shown separately and does not replace the community signal."
+            )
+        else:
+            why = (
+                f"{title} from community and public web reports. "
+                f"An official {official.agency} recall is also on record — shown separately, "
+                "not as proof that early posts predicted the recall."
+            )
+
     return {
-        "signal_type": "official_recall" if official else key,
-        "severity_key": "official_recall" if official else key,
-        "severity_label": "Official recall" if official else title,
+        "signal_type": key,
+        "severity_key": key,
+        "severity_label": title,
         "internal_strength": round(strength, 3),
         "report_count": total,
         "independent_count": int(round(independent)),
@@ -156,6 +181,7 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
         "issues": issues,
         "explanation": why,
         "official_recall": _serialize_recall(official) if official else None,
+        "internet_before_official": internet_before_official,
         "components": {
             "recent_report_velocity": round(velocity_component, 3),
             "source_diversity": round(source_div, 3),
@@ -167,13 +193,13 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
     }
 
 
-def _explain(*, title, recent_count, previous_count, independent, total, geo_count, issues, official) -> str:
-    if official:
+def _explain(*, title, recent_count, previous_count, independent, total, geo_count, issues, official, internet_before_official) -> str:
+    top = issues[0]["name"] if issues else "the same problem"
+    if total == 0 and official:
         return (
             f"An official recall is on record from {official.agency}. "
-            "Community reports are shown separately as supporting context, not as proof of the recall."
+            "No earlier community cluster is loaded for this product yet."
         )
-    top = issues[0]["name"] if issues else "the same problem"
     if previous_count:
         ratio = recent_count / max(previous_count, 1)
         return (
@@ -181,30 +207,54 @@ def _explain(*, title, recent_count, previous_count, independent, total, geo_cou
             f"(of {total} total) describe {top.lower()}. "
             f"Reports increased {ratio:.1f}× over the previous 7 days"
             + (f", across {geo_count} places." if geo_count else ".")
+            + " No official recall is required for a pattern to be worth watching."
         )
     if total == 0:
         return "No community reports are associated with this product in connected sources yet."
     return (
         f"{title} based on {int(round(independent))} independent-looking reports "
-        f"describing {top.lower()}. This is a pattern in public and community reports, "
-        "not a determination that the product is unsafe."
+        f"describing {top.lower()}. This is a pattern in public and community reports — "
+        "often visible before any official recall page exists."
     )
 
 
 def _serialize_recall(recall: Recall) -> dict:
+    status = "Unknown"
+    reason = recall.reason or ""
+    if reason.startswith("[") and "]" in reason[:40]:
+        status = reason[1 : reason.index("]")]
+        reason = reason[reason.index("]") + 1 :].strip()
+    # Date fallback: older than ~6 months treated as past unless marked Ongoing.
+    age_days = (datetime.utcnow() - recall.recall_date).days if recall.recall_date else 9999
+    if status.lower() == "ongoing":
+        phase = "ongoing"
+    elif status.lower() in {"terminated", "completed"} or age_days > 180:
+        phase = "past"
+    else:
+        phase = "ongoing" if age_days <= 120 else "past"
     return {
         "agency": recall.agency,
         "recall_date": recall.recall_date.date().isoformat(),
-        "reason": recall.reason,
+        "reason": reason,
         "hazard": recall.hazard,
         "source_url": recall.source_url,
         "nationwide": recall.nationwide,
+        "status": status,
+        "phase": phase,
     }
 
 
 def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
     cards = []
-    for product in db.query(Product).all():
+    # Home feed is food / watchlist first — keep the payload small and fast.
+    products = (
+        db.query(Product)
+        .filter(Product.category == "Food")
+        .order_by(Product.id)
+        .limit(40)
+        .all()
+    )
+    for product in products:
         signal = compute_signal(db, product)
         if signal["severity_key"] == "no_significant_signal" and not signal["official_recall"]:
             continue
@@ -212,12 +262,26 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
         if visitor_city:
             local = any(visitor_city.lower() == g["label"].lower() for g in signal["geography"])
         cards.append({"product": product, "signal": signal, "local": local})
-    rank = {
-        "official_recall": 0,
-        "strong_emerging_signal": 1,
-        "emerging_signal": 2,
-        "elevated_reports": 3,
-        "limited_reports": 4,
-    }
-    cards.sort(key=lambda item: (rank.get(item["signal"]["severity_key"], 9), -item["signal"]["report_count"]))
+
+    def sort_key(item: dict) -> tuple:
+        signal = item["signal"]
+        key = signal["severity_key"]
+        official = bool(signal.get("official_recall"))
+        emerging = key in {"strong_emerging_signal", "emerging_signal", "elevated_reports"}
+        humanish = signal.get("source_diversity", 0) >= 0.2 or signal.get("report_count", 0) >= 3
+        # Internet-first: emerging without FDA, then emerging FDA later confirmed,
+        # then official-only shelves. Prefer cards that still look human-sourced.
+        if emerging and not official:
+            tier = 0
+        elif emerging and official:
+            tier = 1
+        elif official:
+            tier = 2
+        else:
+            tier = 3
+        before = 0 if signal.get("internet_before_official") else 1
+        human = 0 if humanish else 1
+        return (tier, human, before, -signal.get("internal_strength", 0), -signal.get("report_count", 0))
+
+    cards.sort(key=sort_key)
     return cards

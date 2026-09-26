@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from ..models import Report
-from .embeddings import cosine, embed_text, load_vector, store_embedding
+from .embeddings import cosine, embed_text, lexical_vector, load_vector, store_embedding
 
 # Near-duplicate threshold: quoting or reposting the same incident.
 DUPLICATE_THRESHOLD = 0.92
@@ -54,9 +54,13 @@ def relatedness(text_a: str, text_b: str) -> float:
 
 
 def cluster_strength(texts: list[str]) -> float:
+    """
+    Average pairwise similarity among report texts.
+    Uses local lexical vectors only — never OpenAI — so /api/feed stays fast.
+    """
     if len(texts) < 2:
         return 0.15 if texts else 0.0
-    vectors = [embed_text(text)[0] for text in texts[:40]]
+    vectors = [lexical_vector(text) for text in texts[:40]]
     total = 0.0
     pairs = 0
     for i, left in enumerate(vectors):

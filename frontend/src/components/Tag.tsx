@@ -1,4 +1,7 @@
 const STYLES: Record<string, string> = {
+  "INTERNET FIRST": "bg-[#e8f6ef] text-[#1f7a4d] border border-[#b7d7c6]",
+  "FDA RECALL": "bg-[#f8dce0] text-[#9a3140] border border-[#e8a8b0]",
+  "CPSC RECALL": "bg-[#f8dce0] text-[#9a3140] border border-[#e8a8b0]",
   "OFFICIAL RECALL": "bg-[#f8dce0] text-[#9a3140] border border-[#e8a8b0]",
   "EMERGING SIGNAL": "bg-[#f7e8c4] text-[#7a5b16] border border-[#e6d09a]",
   "STRONG SIGNAL": "bg-[#f7e8c4] text-[#7a5b16] border border-[#d4b65a]",
@@ -8,7 +11,7 @@ const STYLES: Record<string, string> = {
   NATIONWIDE: "bg-[#eef3f8] text-[#5a6d80] border border-[#d7e4f2]",
   TRENDING: "bg-[#f6e7ea] text-[#c45c6a] border border-[#e8a8b0]",
   CPSC: "bg-[#eef3f8] text-[#5a6d80] border border-[#d7e4f2]",
-  FDA: "bg-[#eef3f8] text-[#5a6d80] border border-[#d7e4f2]",
+  FDA: "bg-[#e7f6ee] text-[#1f7a4d] border border-[#b7d7c6]",
 };
 
 export function Tag({ label }: { label: string }) {
