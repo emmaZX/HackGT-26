@@ -19,6 +19,7 @@ def score_caers_spike(
     now: datetime | None = None,
     window_days: int = 14,
     baseline_weeks: int = 6,
+    reports: list[Report] | None = None,
 ) -> dict:
     """
     Compare recent CAERS report count to a prior weekly baseline.
@@ -31,11 +32,14 @@ def score_caers_spike(
     min_n = settings.caers_spike_min_reports
     velocity_floor = settings.caers_spike_velocity
 
-    reports = (
-        db.query(Report)
-        .filter(Report.product_id == product_id, Report.source == "caers")
-        .all()
-    )
+    if reports is None:
+        reports = (
+            db.query(Report)
+            .filter(Report.product_id == product_id, Report.source == "caers")
+            .all()
+        )
+    else:
+        reports = [r for r in reports if r.source == "caers"]
     # openFDA CAERS often lags wall-clock time — anchor velocity to the newest
     # report date so spikes are visible in the ingested distribution.
     dated = [r.created_at for r in reports if r.created_at]

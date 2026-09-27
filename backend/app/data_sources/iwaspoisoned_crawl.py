@@ -143,6 +143,10 @@ def crawl_grocery_incidents(
                     len(rows),
                     len(listed),
                 )
+                print(
+                    f"iWP list page {page_num}: +{len(rows)} links (listed={len(listed)})",
+                    flush=True,
+                )
                 if capped:
                     break
                 # Entire page older than window → stop paging further back.
@@ -209,6 +213,10 @@ def crawl_grocery_incidents(
                 )
                 if idx % 25 == 0:
                     logger.info("iWP detail progress %s/%s kept=%s", idx, len(listed), len(incidents))
+                    print(
+                        f"iWP detail progress {idx}/{len(listed)} kept={len(incidents)}",
+                        flush=True,
+                    )
             browser.close()
     except Exception as exc:
         logger.exception("iWP grocery crawl failed")

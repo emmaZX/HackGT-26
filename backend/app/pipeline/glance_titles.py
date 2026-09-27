@@ -69,16 +69,20 @@ _WEAK_BRAND = re.compile(
 
 _FOOD_WORD = re.compile(
     r"\b("
-    r"chicken|turkey|beef|pork|goat|lamb|meat|poultry|sausage|deli|ham|bacon|"
+    r"chicken|turkey|beef|pork|goat|lamb|meat|poultry|sausage|ham|bacon|"
     r"nugget|chorizo|carnitas|dumpling|empanada|chili|soup|salad|wrap|"
-    r"cheese|milk|cream|yogurt|butter|ice\s*cream|gelato|"
+    r"cheese|milk|cream|yogurt|butter|"
     r"lettuce|romaine|spinach|sprout|alfalfa|cantaloupe|melon|blueberry|mango|"
     r"pepper|jalapeño|jalapeno|onion|mushroom|shrimp|salmon|fish|oyster|seafood|"
     r"shake|protein|gushers|snack|candy|tamales|pasta|soda|crackers|chips?|"
-    r"burrito|taco|sandwich|soup|stew|pizza|burger|nuggets|wings|bake|"
-    r"hummus|hotdog|hot\s*dog|cookie|meal|produce|grocery|fruit|vegetable|"
-    r"yogurt|smoothie|juice|bread|bagel|muffin|rice|bean|noodle|"
-    r"prepared|snacks?|dairy|poultry|foods|store|purchase"
+    r"burrito|taco|sandwich|stew|pizza|burger|nuggets|wings|bake|"
+    r"hummus|hotdog|hot\s*dog|cookie|produce|fruit|vegetable|"
+    r"smoothie|juice|bread|bagel|muffin|rice|bean|noodle|"
+    r"eggs?|cereal|granola|trail\s*mix|nuts?|apple|banana|berry|berries|"
+    r"tomato|cucumber|carrot|broccoli|cauliflower|avocado|queso|tortilla|"
+    r"ramen|macaroni|lasagna|ravioli|coleslaw|potato|fries|rotisserie|"
+    r"ice\s*cream|yogurt|brisket|poke|tenders?|sub|pot\s*pie|salmon|"
+    r"mac\s*&\s*cheese|macaroni\s*and\s*cheese|klondike|nuggets?"
     r")\b",
     re.I,
 )
@@ -87,17 +91,56 @@ _NEWS_CHROME = re.compile(
     r"\b("
     r"causes?\s*(?:illness|sickness|vomiting|diarrhea|cramping)?|"
     r"illness(?:\s+report)?|"
+    r"llness|"  # truncated Illness
     r"food\s+poisoning(?:\s+(?:report|incident|reports))?|"
     r"severe\s+(?:reaction\s+to|diarrhea|vomiting)|"
     r"stomach\s+issues?\s*(?:post-?)?|"
     r"digestive\s+issues?|"
     r"twice\s+sick\s+from|"
     r"recall\s+alert:?|"
+    r"alert:?|"
     r"report\s+it\s+now!?|"
     r"cyclospor(?:i)?a\s+symptoms\s+after|"
     r"symptoms\s+after|"
-    r"diarrhea\s+alert:?"
+    r"a\s+few\s+hours\s+after\s+eating|"
+    r"after\s+eating|"
+    r"pain\s*-?|"
+    r"was\s+an|"
+    r"purchased|bought|"
+    r"diarrhea\s+alert:?|"
+    r"yesterday|today|tonight|this\s+morning|this\s+afternoon|"
+    r"last\s+night|"
+    r"\d+\s*(?:minute|hour|day|week|month)s?\s+ago|"
+    r"a\s+few\s+hours?|"
+    r"delivers?\s+nausea|nausea|"
+    r"pack\s+of|"
+    r"spoiled|expired|moldy|"
+    r"got\s+sick(?:\s+from)?|"
+    r"from\s+(?:the\s+)?"
     r")\b",
+    re.I,
+)
+
+# Sentence fragments / OCR garbage — never a shelf SKU.
+_JUNK_PHRASE = re.compile(
+    r"("
+    r"\bto\s+drink\b|"
+    r"\beat\s+some\b|"
+    r"\btaste\s+in\b|"
+    r"\bdelivers?\b|"
+    r"\bnausea\b|"
+    r"\bheartburn\b|"
+    r"\bw\s+pieces\b|"
+    r"\bie\s+calander\b|"
+    r"\bpot\s+pir\b|"
+    r"\bal\s+taste\b|"
+    r"\bwei'?s\b|"
+    r"\bitedstates\b|"
+    r"\btates\b|"
+    r"#\w+|"
+    r"\bef\s+boyardee\b|"
+    r"\bbr\b$"
+    r")",
     re.I,
 )
 
@@ -163,11 +206,64 @@ def glance_title(*, brand: str | None, name: str | None) -> dict | None:
     item = _NEWS_CHROME.sub(" ", item)
     item = re.sub(r"\s+", " ", item).strip(" ,.-–—")
     # Drop dangling "Cause(s)" / "To" left after chrome removal
-    item = re.sub(r"\s+(causes?|to)$", "", item, flags=re.I).strip(" ,.-–—")
+    item = re.sub(r"\s+(causes?|to|from|ago)$", "", item, flags=re.I).strip(" ,.-–—")
+
+    brand_out = _brand(brand_s)
+    if brand_out.lower() in {"unknown", "fda watch", "search", "caers report", "fsis"}:
+        brand_out = ""
+
+    # Strip grocery banner echoed into the product name ("Publix Spanish …")
+    if brand_out:
+        item = re.sub(
+            rf"^{re.escape(brand_out)}\s+",
+            "",
+            item,
+            flags=re.I,
+        ).strip(" ,.-–—")
+        for alias in re.split(r"[\s&]+", brand_out):
+            if len(alias) >= 4:
+                item = re.sub(rf"^{re.escape(alias)}\s+", "", item, flags=re.I).strip()
+        # Trailing brand echo ("Chicken - Lidl")
+        item = re.sub(
+            rf"\s*[-–—]\s*{re.escape(brand_out)}\s*$",
+            "",
+            item,
+            flags=re.I,
+        ).strip()
+        item = re.sub(
+            rf"\s+{re.escape(brand_out)}\s*$",
+            "",
+            item,
+            flags=re.I,
+        ).strip()
+    # Drop hashtag spam left in scraped titles
+    item = re.sub(r"#\w+", " ", item)
+    item = re.sub(r"\s+", " ", item).strip(" ,.-–—")
+    # Complete truncated ice cream labels
+    if re.search(r"\bice$", item, re.I) and not re.search(r"\bice\s*cream\b", item, re.I):
+        item = re.sub(r"\bice$", "Ice Cream", item, flags=re.I)
+    # Drop trailing single-letter noise ("Chicken Salad - H")
+    item = re.sub(r"\s*[-–—]\s*[A-Za-z]$", "", item).strip()
+    if len(item.split()) > 2:
+        item = re.sub(r"\s+[A-Za-z]$", "", item).strip()
+
+    if _JUNK_PHRASE.search(item):
+        return None
+    # Reject leftover time / filler tokens
+    if re.fullmatch(
+        r"(yesterday|today|tonight|morning|ago|pack|from)",
+        item,
+        flags=re.I,
+    ):
+        return None
+    # Ultra-generic one-word foods need a grocery brand or they're useless cards
+    if re.fullmatch(r"(chicken|egg|eggs|pasta|pizza|lettuce|berries|berry)", item, flags=re.I):
+        if not brand_out:
+            return None
     if item.lower() in {"meal", "costco meal", "prepared meal"}:
         item = "Prepared meal"
     if item.lower() in {"in-store food", "instore food", "store food", "grocery purchase"}:
-        item = "In-store food"
+        return None
     if item.lower() in {"milk cheese", "milk cheeses"}:
         item = "Raw milk cheese"
     if item.lower() in {"soft cheeses", "soft / queso-style cheeses", "soft cheese"}:
@@ -176,10 +272,7 @@ def glance_title(*, brand: str | None, name: str | None) -> dict | None:
         item = "Romaine salad mix"
     if "protein powder" in item.lower():
         item = "Protein powder"
-
-    brand_out = _brand(brand_s)
-    if brand_out.lower() in {"unknown", "fda watch", "search", "caers report", "fsis"}:
-        brand_out = ""
+    item = re.sub(r"^(Spoiled|Expired|Moldy)\s+", "", item, flags=re.I).strip()
 
     # Weak one-word "brands" are usually part of the product name (Whole Milk, Baby Spinach).
     if brand_out and _WEAK_BRAND.match(brand_out):
@@ -229,18 +322,28 @@ def is_sensible_product(brand: str | None, name: str | None, *, slug: str | None
     name_l = (name or "").strip().lower()
     if name_l in {"in-store food", "instore food", "store food", "grocery item", "grocery purchase"}:
         return False
-    # iWasPoisoned store pages often become "X Grocery" / "Hy-Vee Grocery Store".
+    # Venue / banner names are not grocery SKUs.
     if re.search(
         r"("
         r"\bgrocery(\s+(store|outlet|market|basket|supercenter))?\b|"
         r"\bsupermarket\b|"
         r"\bsupercenter\b|"
         r"\bwholesale\s+club\b|"
-        r"\bneighborhood\s+market\b"
+        r"\bneighborhood\s+market\b|"
+        r"\bconvenience\s+store\b|"
+        r"\bice\s*cream\s*&\s*dairy\s*store\b|"
+        r"\bfood\s*&\s*deli\b|"
+        r"\bbakery\s*&\s*deli\b|"
+        r"\bfresh\s+foods?\b$"
         r")",
         name_l,
     ):
         return False
+    # Name must include a real edible (not the store brand alone).
+    if not _FOOD_WORD.search(name_l):
+        # Official / CAERS / outbreak slugs can still pass via glance_title food check below.
+        if not (slug or "").lower().startswith(("fsis-", "outbreak-", "caers-")):
+            return False
     titled = glance_title(brand=brand, name=name)
     if not titled:
         return False

@@ -238,15 +238,54 @@ _GROCERY_BRANDS = re.compile(
     r"Food\s*Lion|H-?E-?B|Meijer|Target|Sam'?s\s*Club|Sprouts|Wegmans|"
     r"Harris\s*Teeter|Giant\s*Eagle|Lid[l]|ShopRite|Albertsons|Fred\s*Meyer|"
     r"Kirkland(?:\s+Signature)?|Weis(?:\s*Markets)?|Piggly\s*Wiggly|"
-    r"Dollar\s*Tree|BJ'?s(?:\s*Wholesale)?|Brookshire'?s?)\b",
+    r"Dollar\s*Tree|BJ'?s(?:\s*Wholesale)?|Brookshire'?s?|WinCo(?:\s*Foods)?|"
+    r"Hy-?Vee|Jewel(?:-?Osco)?|Vons|Ralphs|Food\s*4\s*Less|Market\s*Basket|"
+    r"Giant(?:\s*Food)?|Stop\s*&\s*Shop|Hannaford|Ingles|Winn-?Dixie)\b",
+    re.I,
+)
+
+# Venues that appear on iWasPoisoned but are NOT supermarket grocery SKU reports.
+_NON_GROCERY_VENUE = re.compile(
+    r"\b("
+    r"restaurant|cafe|café|diner|grill|taqueria|pizzeria|bistro|"
+    r"convenience\s+store|gas\s+station|truck\s+stop|"
+    r"ice\s*cream\s*(?:shop|parlor|store|&)|"
+    r"bakery(?!\s+section)|donut|doughnut|"
+    r"food\s*&\s*deli|deli\s*&\s*grocery|"
+    r"braum'?s|dairy\s+store|"
+    r"hotel|resort|cruise|airport|stadium|fairground"
+    r")\b",
+    re.I,
+)
+
+_FOOD_TOKEN = re.compile(
+    r"\b("
+    r"chicken|turkey|beef|pork|ham|bacon|sausage|salad|lettuce|romaine|spinach|"
+    r"milk|cheese|yogurt|egg|eggs|pasta|bread|rice|soup|stew|sandwich|wrap|"
+    r"burrito|taco|pizza|wings|nugget|nuggets|bake|cookie|chips?|crackers|"
+    r"shrimp|salmon|fish|produce|fruit|berry|berries|apple|banana|tomato|"
+    r"pepper|jalape[ñn]o|onion|avocado|queso|tortilla|hummus|cereal|granola|"
+    r"smoothie|juice|soda|candy|tamales|ramen|macaroni|coleslaw|rotisserie|"
+    r"potato|fries|mushroom|cucumber|carrot|broccoli|cauliflower|"
+    r"ice\s*cream|brisket|poke|tenders?|sub|pot\s*pie|klondike|"
+    r"mac\s*&\s*cheese|macaroni\s*and\s*cheese|nuggets?"
+    r")\b",
+    re.I,
+)
+
+_ATE_PATTERN = re.compile(
+    r"\b(?:ate|eaten|bought|purchased|tried|had|got)\s+(?:the\s+|a\s+|some\s+)?"
+    r"([A-Za-z][A-Za-z0-9&'\- ]{2,48}?)(?:\s+from|\s+at|\s+and|\s+which|\.|,|$)",
     re.I,
 )
 
 # iWasPoisoned title chrome — strip so we keep a shelf product name, not a headline.
 _IWP_CHROME = re.compile(
     r"\b("
+    r"food\s+safety\s+reports?:?|"
     r"food\s+poisoning(?:\s+reports?|\s+incident)?|"
     r"illness(?:\s+report)?|"
+    r"llness|"
     r"causes?\s+(?:sickness|illness|vomiting|diarrhea|cramping)|"
     r"severe\s+(?:reaction\s+to|diarrhea|vomiting|cramping)|"
     r"stomach\s+issues?\s*(?:post-?)?|"
@@ -255,8 +294,18 @@ _IWP_CHROME = re.compile(
     r"recall\s+alert:?|"
     r"got\s+sick(?:\s+from)?|"
     r"report\s+it\s+now!?|"
+    r"\d+\s+(?:minute|hour|day|week|month)s?\s+ago|"
+    r"yesterday|today|tonight|this\s+morning|this\s+afternoon|"
+    r"a\s+few\s+hours?(?:\s+after(?:\s+eating)?)?|"
+    r"after\s+eating|"
+    r"spoiled|expired|moldy|"
+    r"pack\s+of|"
     r"suspected|"
     r"incident|"
+    r"delivers?\s+nausea|nausea|"
+    r"purchased|bought|"
+    r"was\s+an|"
+    r"alert:?|"
     r"reports?"
     r")\b",
     re.I,
@@ -320,7 +369,6 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
     left = re.sub(r"\s+causes?\s*$", "", left, flags=re.I).strip(" ,.-–—")
 
     if len(left) < 3:
-        # No named food — do not invent a store-level product shell.
         return (brand, "")
 
     from .glance_titles import glance_title
@@ -329,9 +377,78 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
     if titled:
         out_brand = titled["brand"] if titled["brand"] not in {"", "Unknown"} else brand
         return (out_brand or brand or "", titled["name"])
-    # Soft fallback: keep a short food-ish left clause, never "In-store food".
     soft = left[:40].strip(" ,.-–—")
     return (brand, soft if len(soft) >= 3 else "")
+
+
+def resolve_grocery_food_identity(*, title: str, text: str = "") -> tuple[str, str] | None:
+    """
+    Return (brand, food_name) only when we can name a real grocery food SKU.
+    Store-only / restaurant / convenience reports return None.
+    """
+    blob = f"{title or ''}\n{text or ''}"
+    if _NON_GROCERY_VENUE.search(blob) and not _GROCERY_BRANDS.search(blob):
+        return None
+    # Pure venue titles with no food token in the whole page → reject.
+    brand, name = split_grocery_identity(title or "")
+    if name and _FOOD_TOKEN.search(name) and not _NON_GROCERY_VENUE.search(name):
+        if brand or _GROCERY_BRANDS.search(blob):
+            return ((brand or _grocery_brand_from_blob(blob) or "").strip(), name.strip())
+
+    # Pull food from body ("ate the chicken bake", "bought romaine salad").
+    for match in _ATE_PATTERN.finditer(text or ""):
+        candidate = match.group(1).strip(" ,.-–—")
+        candidate = _IWP_CHROME.sub(" ", candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        if len(candidate) < 3 or len(candidate) > 48:
+            continue
+        if not _FOOD_TOKEN.search(candidate):
+            continue
+        if _NON_GROCERY_VENUE.search(candidate):
+            continue
+        from .glance_titles import glance_title
+
+        store = brand or _grocery_brand_from_blob(blob)
+        if not store:
+            continue
+        titled = glance_title(brand=store, name=candidate)
+        if not titled:
+            continue
+        return (titled["brand"] or store, titled["name"])
+
+    # Last chance: first food-looking phrase near a grocery brand in the body.
+    store = brand or _grocery_brand_from_blob(blob)
+    if not store:
+        return None
+    for line in re.split(r"[\n.]+", text or ""):
+        line = line.strip()
+        if not line or not _FOOD_TOKEN.search(line):
+            continue
+        if _NON_GROCERY_VENUE.search(line):
+            continue
+        # Prefer short clauses
+        clause = line[:60]
+        m = _FOOD_TOKEN.search(clause)
+        if not m:
+            continue
+        # Expand a little around the food token
+        start = max(0, m.start() - 12)
+        end = min(len(clause), m.end() + 24)
+        snippet = clause[start:end].strip(" ,.-–—")
+        snippet = re.sub(r"^(the|a|an|some|my)\s+", "", snippet, flags=re.I)
+        if len(snippet) < 3:
+            continue
+        from .glance_titles import glance_title
+
+        titled = glance_title(brand=store, name=snippet)
+        if titled and _FOOD_TOKEN.search(titled["name"]):
+            return (titled["brand"] or store, titled["name"])
+    return None
+
+
+def _grocery_brand_from_blob(blob: str) -> str:
+    m = _GROCERY_BRANDS.search(blob or "")
+    return m.group(0) if m else ""
 
 
 def is_allowed_iwaspoisoned_url(url: str, *, title: str = "", snippet: str = "") -> bool:
@@ -344,6 +461,8 @@ def is_allowed_iwaspoisoned_url(url: str, *, title: str = "", snippet: str = "")
     if "iwaspoisoned.com" not in lowered:
         return True
     blob = f"{url}\n{title}\n{snippet}"
+    if _NON_GROCERY_VENUE.search(blob) and not _GROCERY_BRANDS.search(blob):
+        return False
     groceryish = bool(_GROCERY_HINT.search(blob) or _GROCERY_BRANDS.search(blob))
     # Restaurant / QSR paths — reject unless URL itself is clearly a grocery banner.
     if _IWP_RESTAURANT_REJECT.search(lowered):

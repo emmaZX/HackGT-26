@@ -42,6 +42,27 @@ start_home_scrape_background(home_slugs)
 start_cpsc_sync_background()
 start_image_lookup_background()
 
+
+def _warm_feed_cache() -> None:
+    """Precompute the national homepage so the first visitor isn't paying ~7s."""
+    import logging
+    import threading
+
+    log = logging.getLogger("app.feed_cache")
+
+    def worker() -> None:
+        try:
+            with SessionLocal() as db:
+                list_feed(db, city=None)
+            log.info("Homepage feed cache warmed")
+        except Exception:
+            log.exception("Homepage feed cache warm failed")
+
+    threading.Thread(target=worker, name="feed-cache-warm", daemon=True).start()
+
+
+_warm_feed_cache()
+
 app = FastAPI(title="Recall Me Maybe", version="0.1.0", docs_url="/docs")
 app.add_middleware(
     CORSMiddleware,

@@ -50,6 +50,18 @@ def get_product(db: Session, slug: str) -> Product | None:
 
 
 def list_feed(db: Session, city: str | None = None) -> dict:
+    from .feed_cache import get as cache_get, set as cache_set
+
+    cached = cache_get(city)
+    if cached is not None:
+        return cached
+
+    payload = _build_feed(db, city=city)
+    cache_set(city, payload)
+    return payload
+
+
+def _build_feed(db: Session, city: str | None = None) -> dict:
     cards = feed_cards(db, visitor_city=city)
     serialized = [product_card(item["product"], item["signal"], item["local"]) for item in cards]
 
@@ -81,29 +93,92 @@ def list_feed(db: Session, city: str | None = None) -> dict:
 
     # Home hero: community / conjecture first, then a thin recent-official slice.
     important = (unofficial[:8] + official[:6] + caers_spikes[:4])[:18]
-    nearby = [card for card in important if card["local"]]
+    # Local shelf: any card with geography matching the visitor city (not just important).
+    nearby = [card for card in serialized if card.get("local")]
     trending = sorted(
         [card for card in (unofficial + official) if card["signal"].get("velocity_percent")],
         key=lambda card: card["signal"]["velocity_percent"] or 0,
         reverse=True,
     )[:10]
-    recent = (
-        db.query(Report)
-        .options(joinedload(Report.issue_links).joinedload(ReportIssue.issue), joinedload(Report.product))
-        .filter(Report.source.in_(("web", "reddit", "news", "community", "iwaspoisoned", "x", "user")))
-        .order_by(Report.created_at.desc())
-        .limit(20)
-        .all()
-    )
-    # Fall back if filters emptied the list.
-    if not recent:
-        recent = (
-            db.query(Report)
-            .options(joinedload(Report.issue_links).joinedload(ReportIssue.issue), joinedload(Report.product))
-            .order_by(Report.created_at.desc())
-            .limit(20)
-            .all()
+
+    def _hazard_urgency(c: dict) -> int:
+        """Higher = more urgent for a shopper. Pure heuristics — no model."""
+        sig = c.get("signal") or {}
+        recall = sig.get("official_recall") or {}
+        outbreak = sig.get("outbreak") or {}
+        blob = " ".join(
+            str(x or "")
+            for x in (
+                recall.get("hazard"),
+                recall.get("reason"),
+                outbreak.get("pathogen"),
+                c.get("name"),
+                c.get("summary"),
+            )
+        ).lower()
+        score = 0
+        # Pathogen / acute foodborne risk
+        if any(k in blob for k in ("listeria", "botulism")):
+            score += 55
+        elif any(k in blob for k in ("e. coli", "ecoli", "e coli", "salmonella", "cyclospora")):
+            score += 45
+        # Uninspected meat/poultry is a large shopper-facing FSIS event even without pathogen text.
+        if "without" in blob and "inspection" in blob:
+            score += 60
+        if any(k in blob for k in ("undeclared", "allergen", "misbrand")):
+            score += 25
+        if any(k in blob for k in ("contamination", "contaminat", "foreign material")):
+            score += 20
+        if any(k in blob for k in ("import violation", "illegal")):
+            score += 10
+        # Agency hint: FSIS product recalls are typically packaged meat at retail scale.
+        agency = str((recall.get("agency") or "")).upper()
+        if "FSIS" in agency or "USDA" in agency:
+            score += 15
+        # Scale: larger recalls matter more when we can see pounds/cases.
+        import re as _re
+
+        m = _re.search(r"([\d,]+)\s*(?:lb|lbs|pounds)\b", blob)
+        if m:
+            try:
+                lbs = int(m.group(1).replace(",", ""))
+                # Cap so one giant recall doesn't totally erase Class I produce.
+                score += min(40, lbs // 5000)
+            except ValueError:
+                pass
+        # Class I language if present
+        if "class i" in blob or "class 1" in blob:
+            score += 30
+        elif "class ii" in blob or "class 2" in blob:
+            score += 10
+        return score
+
+    def _prio(c: dict) -> tuple:
+        """
+        Shopper urgency — NOT an AI rank.
+        1) Official product recalls beat outbreak watches beat community beat CAERS
+        2) Within recalls: hazard severity + poundage, then newer date
+        """
+        tier = c.get("source_tier") or c["signal"].get("source_tier") or "unofficial"
+        sig = c.get("signal") or {}
+        has_recall = bool(sig.get("official_recall"))
+        has_outbreak = bool(sig.get("outbreak"))
+        # 0 = product recall, 1 = outbreak watch only, 2 = neither
+        official_kind = 0 if has_recall else (1 if has_outbreak else 2)
+        date = str(((sig.get("official_recall") or {}).get("recall_date") or "0000-00-00"))
+        return (
+            {"official": 0, "unofficial": 1, "caers": 2}.get(tier, 3),
+            official_kind,
+            -_hazard_urgency(c),
+            -(c.get("evidence_count") or sig.get("report_count") or 0),
+            -float(sig.get("internal_strength") or 0),
+            # Invert ISO date so newer sorts first without a second pass.
+            "".join(chr(255 - min(ord(ch), 255)) for ch in date),
         )
+
+    priority_foods = sorted(serialized, key=_prio)[:24]
+    # Home UI no longer renders a raw "latest reports" list — skip the extra
+    # round-trip (was another ~1s on remote Postgres).
     return {
         "important": important,
         "official": official[:40],
@@ -111,15 +186,12 @@ def list_feed(db: Session, city: str | None = None) -> dict:
         "unofficial": unofficial[:60],
         "nearby": nearby,
         "trending": trending,
-        "recent_reports": [
-            {**report_card(report), "product_slug": report.product.slug, "product_name": report.product.name}
-            for report in recent
-        ],
+        "priority_foods": priority_foods,
+        "recent_reports": [],
         "visitor_city": city,
         "disclaimer": (
-            "Home leads with community / iWasPoisoned / Reddit-style reports. "
-            "Official FDA/FSIS items are recent Ongoing notices only — resolved or stale recalls are removed. "
-            "CAERS is FDA-hosted complaint data, not a recall."
+            "Cards are grocery foods with linked sources (FDA/USDA notices, CAERS, or iWasPoisoned grocery reports). "
+            "Community posts are early signals, not proof of harm. Official recalls are Ongoing only."
         ),
     }
 
@@ -603,6 +675,9 @@ def create_user_report(db: Session, payload: dict, user: AuthUser) -> dict:
     db.add(post)
     db.commit()
     db.refresh(product)
+    from .feed_cache import invalidate
+
+    invalidate()
     return {
         "message": "Thank you — your report contributes to the community signal for this product.",
         "product": product_payload(db, product),
@@ -654,6 +729,9 @@ def create_post(db: Session, payload: dict, user: AuthUser) -> dict:
     db.add(post)
     db.commit()
     db.refresh(post)
+    from .feed_cache import invalidate
+
+    invalidate()
     return {"post": post_card(post), "product_slug": product.slug}
 
 

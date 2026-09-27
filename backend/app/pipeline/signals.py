@@ -49,23 +49,32 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
 
-def compute_signal(db: Session, product: Product, now: datetime | None = None) -> dict:
+def compute_signal(
+    db: Session,
+    product: Product,
+    now: datetime | None = None,
+    *,
+    reports: list[Report] | None = None,
+    recalls: list[Recall] | None = None,
+) -> dict:
     now = now or datetime.utcnow()
-    reports = (
-        db.query(Report)
-        .options(
-            joinedload(Report.issue_links).joinedload(ReportIssue.issue),
-            joinedload(Report.embedding),
+    if reports is None:
+        reports = (
+            db.query(Report)
+            .options(
+                joinedload(Report.issue_links).joinedload(ReportIssue.issue),
+                joinedload(Report.embedding),
+            )
+            .filter(Report.product_id == product.id)
+            .all()
         )
-        .filter(Report.product_id == product.id)
-        .all()
-    )
-    recalls = (
-        db.query(Recall)
-        .filter(Recall.product_id == product.id, Recall.official.is_(True))
-        .order_by(Recall.recall_date.desc())
-        .all()
-    )
+    if recalls is None:
+        recalls = (
+            db.query(Recall)
+            .filter(Recall.product_id == product.id, Recall.official.is_(True))
+            .order_by(Recall.recall_date.desc())
+            .all()
+        )
 
     total = len(reports)
     independent = sum(r.independence_weight for r in reports)
@@ -184,7 +193,8 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
     spike = None
     caers_reports = [r for r in reports if r.source == "caers"]
     if caers_reports:
-        spike = score_caers_spike(db, product.id, now=now)
+        # Score in-memory from the reports we already loaded (no extra round trip).
+        spike = score_caers_spike(db, product.id, now=now, reports=caers_reports)
         if not spike.get("is_spike"):
             spike = {**spike, "is_spike": False}
 
@@ -368,7 +378,7 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
         Product.slug.like("caers-%"),
     ]
     if official_ids:
-        clauses.insert(0, Product.id.in_(official_ids))
+        clauses.insert(0, Product.id.in_(list(official_ids)))
     special = (
         db.query(Product)
         .filter(Product.category == "Food", or_(*clauses))
@@ -385,13 +395,44 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
         .all()
     )
     products = special + extras
-    for product in products:
-        reports = (
+    product_ids = [p.id for p in products]
+
+    # One round-trip each for reports + recalls (critical on remote Postgres / Supabase).
+    reports_by_product: dict[int, list[Report]] = defaultdict(list)
+    recalls_by_product: dict[int, list[Recall]] = defaultdict(list)
+    if product_ids:
+        all_reports = (
             db.query(Report)
-            .filter(Report.product_id == product.id, Report.is_duplicate.is_(False))
+            .options(
+                joinedload(Report.issue_links).joinedload(ReportIssue.issue),
+                # Skip embeddings on the home feed — cluster_strength falls back
+                # to local lexical vectors, and loading vectors from Supabase
+                # was a large part of the ~7s payload.
+            )
+            .filter(Report.product_id.in_(product_ids), Report.is_duplicate.is_(False))
             .all()
         )
-        signal = compute_signal(db, product)
+        for report in all_reports:
+            reports_by_product[report.product_id].append(report)
+        all_recalls = (
+            db.query(Recall)
+            .filter(Recall.product_id.in_(product_ids), Recall.official.is_(True))
+            .order_by(Recall.recall_date.desc())
+            .all()
+        )
+        for recall in all_recalls:
+            recalls_by_product[recall.product_id].append(recall)
+
+    now = datetime.utcnow()
+    for product in products:
+        reports = reports_by_product.get(product.id, [])
+        signal = compute_signal(
+            db,
+            product,
+            now=now,
+            reports=reports,
+            recalls=recalls_by_product.get(product.id, []),
+        )
         tier = signal.get("source_tier") or "unofficial"
         # Keep official, CAERS grocery items, and unofficial clusters with signal.
         if tier == "official":

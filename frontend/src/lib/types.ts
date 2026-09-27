@@ -139,6 +139,7 @@ export type Feed = {
   unofficial?: ProductCard[];
   nearby: ProductCard[];
   trending: ProductCard[];
+  priority_foods?: ProductCard[];
   recent_reports: ReportCard[];
   visitor_city: string | null;
   disclaimer: string;

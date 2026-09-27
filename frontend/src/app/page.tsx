@@ -8,7 +8,6 @@ import { LocationPrompt } from "@/components/LocationPrompt";
 import { RecentCarousel } from "@/components/RecentCarousel";
 import { ProductRow } from "@/components/ProductRow";
 import { GeoMap } from "@/components/GeoMap";
-import { EvidenceList, isInternetReport, isUsableSourceUrl } from "@/components/EvidenceList";
 import { POSTED_EVENT } from "@/components/PostModal";
 
 /**
@@ -16,6 +15,31 @@ import { POSTED_EVENT } from "@/components/PostModal";
  * Their data still feeds the carousel. Set to true to show them again.
  */
 const SHOW_TIER_SECTIONS = false;
+
+const FEED_CACHE_KEY = "rmm-home-feed-v1";
+const FEED_CACHE_MAX_AGE_MS = 10 * 60 * 1000; // show stale up to 10 min while refreshing
+
+function readCachedFeed(city: string | null): Feed | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(FEED_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { city: string | null; at: number; feed: Feed };
+    if ((parsed.city || null) !== (city || null)) return null;
+    if (Date.now() - parsed.at > FEED_CACHE_MAX_AGE_MS) return null;
+    return parsed.feed;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedFeed(city: string | null, feed: Feed) {
+  try {
+    sessionStorage.setItem(FEED_CACHE_KEY, JSON.stringify({ city, at: Date.now(), feed }));
+  } catch {
+    /* quota / private mode — ignore */
+  }
+}
 
 export default function HomePage() {
   // Start as null on both server and client; the saved city is read after mount.
@@ -26,11 +50,14 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async (nextCity: string | null) => {
+  const load = useCallback(async (nextCity: string | null, { soft = false }: { soft?: boolean } = {}) => {
     try {
-      setLoading(true);
+      // Soft refresh: keep showing the last feed (news-site style) while we refetch.
+      if (!soft) setLoading(true);
       setError(null);
-      setFeed(await api.feed(nextCity));
+      const next = await api.feed(nextCity);
+      setFeed(next);
+      writeCachedFeed(nextCity, next);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load the latest stories");
     } finally {
@@ -45,8 +72,16 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!cityReady) return;
-    load(city);
-    const refresh = () => load(city);
+    const cached = readCachedFeed(city);
+    if (cached) {
+      setFeed(cached);
+      setLoading(false);
+      // Refresh in background — page already looks full.
+      load(city, { soft: true });
+    } else {
+      load(city);
+    }
+    const refresh = () => load(city, { soft: true });
     window.addEventListener(POSTED_EVENT, refresh);
     return () => window.removeEventListener(POSTED_EVENT, refresh);
   }, [city, cityReady, load]);
@@ -64,15 +99,25 @@ export default function HomePage() {
     : (feed?.important || []).filter((c) => (c.source_tier || c.signal.source_tier || "unofficial") === "unofficial");
 
   const nearbyGeo = feed?.nearby.flatMap((card) => card.signal.geography) || [];
-  const rising = feed?.trending.filter((p) => (p.signal.velocity_percent || 0) > 0) || [];
+  // Prefer foods people near the visitor are reporting; fall back to urgent shelf.
   const mayUse = feed
-    ? (rising.length ? rising : [...official, ...caers, ...unofficial]).slice(0, 4)
+    ? (feed.nearby.length
+        ? feed.nearby
+        : feed.priority_foods?.length
+          ? feed.priority_foods
+          : [...official, ...unofficial, ...caers]
+      ).slice(0, 4)
     : null;
-  const latest = (feed?.recent_reports || [])
-    .filter((r) => isInternetReport(r) || isUsableSourceUrl(r.source_url))
-    .slice(0, 8);
+  const priorityFoods = (feed?.priority_foods?.length
+    ? feed.priority_foods
+    : [...official, ...unofficial, ...caers]
+  ).slice(0, 12);
   const showSkeletons = loading && !feed;
-  const heroCards = [...unofficial, ...official, ...caers].slice(0, 16);
+  // Recent band: urgency order — official → community grocery → CAERS.
+  const heroCards = (feed?.priority_foods?.length
+    ? feed.priority_foods
+    : [...official, ...unofficial, ...caers]
+  ).slice(0, 16);
 
   return (
     <div>
@@ -147,24 +192,42 @@ export default function HomePage() {
 
         <section aria-labelledby="use-title">
           <h2 id="use-title" className="section-title">Products you may use</h2>
+          <p className="mt-2 max-w-[40ch] text-[13px] leading-relaxed text-[#627290]">
+            {city
+              ? `Grocery foods people near ${city} are linking reports about.`
+              : "Set your city above to see grocery foods reported near you."}
+          </p>
           <div className="mt-[23px] grid gap-[17px]">
-            {mayUse
+            {mayUse?.length
               ? mayUse.map((product) => <ProductRow key={product.slug} product={product} />)
-              : Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton h-[86px]" />)}
+              : showSkeletons
+                ? Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton h-[86px]" />)
+                : (
+                  <p className="text-sm text-[#627290]">
+                    {city
+                      ? "No local grocery reports yet — Priority foods below still cover national notices."
+                      : "Choose a city to personalize this list."}
+                  </p>
+                )}
           </div>
         </section>
       </div>
 
       {feed && (
-        <section aria-labelledby="latest-title" className="mt-14">
-          <h2 id="latest-title" className="section-title">Latest reports</h2>
-          <div className="mt-5 max-w-[870px]">
-            <EvidenceList
-              reports={latest}
-              requireUrl
-              emptyMessage="No linked public reports yet. Live discovery fills this section."
-              linkLabel="Open original"
-            />
+        <section aria-labelledby="priority-title" className="mt-14">
+          <h2 id="priority-title" className="section-title">Priority foods</h2>
+          <p className="mt-2 max-w-[70ch] text-[14px] leading-relaxed text-[#627290]">
+            Grocery items ranked by shopper urgency — product recalls first (hazard + size + recency),
+            then outbreak watches, then linked community reports, then CAERS. Not an AI ranking.
+          </p>
+          <div className="mt-5 grid max-w-[870px] gap-[14px]">
+            {priorityFoods.length
+              ? priorityFoods.map((product) => (
+                  <ProductRow key={`priority-${product.slug}`} product={product} />
+                ))
+              : (
+                <p className="text-sm text-[#627290]">No grocery foods with linked sources yet.</p>
+              )}
           </div>
           {feed.disclaimer && (
             <p className="mt-6 max-w-[70ch] text-[13px] leading-relaxed text-[#627290]">{feed.disclaimer}</p>

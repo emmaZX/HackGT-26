@@ -624,11 +624,11 @@ def start_caers_refresh_background() -> None:
     threading.Thread(target=worker, name="caers-refresh", daemon=True).start()
 
 
-    threading.Thread(target=worker, name="caers-refresh", daemon=True).start()
+_community_seed_lock = threading.Lock()
 
 
 def start_community_seed_background() -> None:
-    """Pull recent iWasPoisoned / Reddit illness pages into unofficial (URL + date required)."""
+    """Pull recent iWasPoisoned grocery illness pages into unofficial (URL + date required)."""
 
     def worker() -> None:
         with SessionLocal() as db:
@@ -666,6 +666,20 @@ def seed_community_from_web(db: Session) -> dict:
     Fixed grocery corpus: crawl iWasPoisoned industry list (Playwright), then
     optionally enrich via Exa (grocery only — no Reddit). User search still uses Exa.
     """
+    if not _community_seed_lock.acquire(blocking=False):
+        logger.info("seed_community_from_web skipped — already in progress")
+        return {"ingested": 0, "skipped": "already_running"}
+    try:
+        return _seed_community_from_web_locked(db)
+    finally:
+        _community_seed_lock.release()
+
+
+def _seed_community_from_web_locked(db: Session) -> dict:
+    """
+    Fixed grocery corpus: crawl iWasPoisoned industry list (Playwright), then
+    optionally enrich via Exa (grocery only — no Reddit). User search still uses Exa.
+    """
     from .agents.page_fetch_agent import fetch_candidates
     from .agents.triage_agent import should_ingest_as_internet_evidence, triage_complaint
     from .agents.geo_agent import correlate_location
@@ -681,6 +695,26 @@ def seed_community_from_web(db: Session) -> dict:
     from .pipeline.cluster import attach_and_dedupe
 
     settings = get_settings()
+    # Skip if we just finished a grocery crawl (reload storms / dual starters).
+    cooldown = timedelta(minutes=max(5, settings.discovery_cooldown_minutes))
+    recent = (
+        db.query(DiscoveryRun)
+        .filter(DiscoveryRun.query == "iwp-crawl+exa-grocery")
+        .order_by(DiscoveryRun.id.desc())
+        .first()
+    )
+    if recent and recent.created_at and (datetime.utcnow() - recent.created_at) < cooldown:
+        logger.info(
+            "Skipping grocery crawl — last run %s ago (cooldown %s)",
+            datetime.utcnow() - recent.created_at,
+            cooldown,
+        )
+        return {
+            "ingested": 0,
+            "skipped": "cooldown",
+            "last_run_at": recent.created_at.isoformat(),
+        }
+
     days = settings.discovery_recency_days
     year = datetime.utcnow().year
 
@@ -836,10 +870,13 @@ def seed_community_from_web(db: Session) -> dict:
             rejected += 1
             continue
 
-        from .pipeline.evidence_schema import split_grocery_identity
+        from .pipeline.evidence_schema import resolve_grocery_food_identity
 
-        raw_name = title or text.split("\n")[0][:120]
-        brand_guess, name_guess = split_grocery_identity(raw_name)
+        identity = resolve_grocery_food_identity(title=title, text=text)
+        if not identity:
+            rejected += 1
+            continue
+        brand_guess, name_guess = identity
         # Prefer a quote body without the news-headline first line.
         raw_excerpt = _strip_headline_excerpt(item.get("snippet") or text)[:500]
         evidence, reason = validate_community_evidence(
@@ -862,10 +899,15 @@ def seed_community_from_web(db: Session) -> dict:
             logger.debug("community seed reject %s: %s", url[:80], reason)
             continue
 
-        # Shelf identity: general product name FIRST, then company brand.
+        # Shelf identity: general product name FIRST, then grocery banner brand.
         product_name = evidence.name
         product_brand = evidence.brand if evidence.brand not in {"", "Unknown"} else brand_guess
-        if not product_name or len(product_name) < 3:
+        if not product_name or len(product_name) < 3 or not product_brand:
+            rejected += 1
+            continue
+        from .pipeline.glance_titles import is_sensible_product
+
+        if not is_sensible_product(product_brand, product_name):
             rejected += 1
             continue
 
@@ -908,8 +950,18 @@ def seed_community_from_web(db: Session) -> dict:
         )
         db.add(report)
         db.flush()
-        attach_and_dedupe(db, report)
+        try:
+            attach_and_dedupe(db, report)
+        except Exception:
+            logger.exception("attach_and_dedupe failed for %s — keeping report", url_key[:80])
         ingested += 1
+        # Commit in small batches so a remote timeout doesn't wipe the whole crawl.
+        if ingested % 5 == 0:
+            try:
+                db.commit()
+            except Exception:
+                logger.exception("batch commit failed at ingested=%s", ingested)
+                db.rollback()
 
     # Connect dots: merge only near-identical product · brand stems (keep specifics).
     # Skip Exa enrichment when the HTTPS crawl already built a thick corpus —
@@ -1039,7 +1091,16 @@ def _find_or_create_community_product(db: Session, *, name: str, brand: str) -> 
         summary="Open-web pattern: linked grocery illness reports for this product.",
     )
     db.add(product)
-    db.flush()
+    try:
+        with db.begin_nested():
+            db.flush()
+    except Exception:
+        existing = db.query(Product).filter(Product.slug == slug).first()
+        if existing:
+            existing.name = name[:180]
+            existing.brand = (brand or existing.brand or "Unknown")[:120]
+            return existing
+        raise
     return product
 
 

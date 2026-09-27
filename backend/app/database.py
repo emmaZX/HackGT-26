@@ -22,8 +22,28 @@ def _ensure_sqlite_path(url: str) -> None:
 settings = get_settings()
 _ensure_sqlite_path(settings.resolved_database_url)
 
-connect_args = {"check_same_thread": False} if settings.is_sqlite else {}
-engine = create_engine(settings.resolved_database_url, connect_args=connect_args, future=True)
+connect_args: dict = {}
+engine_kwargs: dict = {"future": True}
+if settings.is_sqlite:
+    connect_args = {"check_same_thread": False}
+else:
+    # Remote Postgres (Supabase): keep a small warm pool and fail fast on dead sockets.
+    # prepare_threshold=None avoids DuplicatePreparedStatement on transaction poolers.
+    connect_args = {"connect_timeout": 10, "prepare_threshold": None}
+    engine_kwargs.update(
+        {
+            "pool_pre_ping": True,
+            "pool_size": 5,
+            "max_overflow": 5,
+            "pool_recycle": 280,
+        }
+    )
+
+engine = create_engine(
+    settings.resolved_database_url,
+    connect_args=connect_args,
+    **engine_kwargs,
+)
 
 if settings.is_sqlite:
     @event.listens_for(engine, "connect")
