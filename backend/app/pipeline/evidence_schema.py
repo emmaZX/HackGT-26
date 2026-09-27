@@ -320,7 +320,8 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
     left = re.sub(r"\s+causes?\s*$", "", left, flags=re.I).strip(" ,.-–—")
 
     if len(left) < 3:
-        left = "In-store food"
+        # No named food — do not invent a store-level product shell.
+        return (brand, "")
 
     from .glance_titles import glance_title
 
@@ -328,11 +329,9 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
     if titled:
         out_brand = titled["brand"] if titled["brand"] not in {"", "Unknown"} else brand
         return (out_brand or brand or "", titled["name"])
-    # Soft fallback for store-level grocery reports with no named SKU
-    if brand:
-        return (brand, "In-store food")
-    soft = left[:40].strip(" ,.-–—") or "Grocery item"
-    return (brand, soft)
+    # Soft fallback: keep a short food-ish left clause, never "In-store food".
+    soft = left[:40].strip(" ,.-–—")
+    return (brand, soft if len(soft) >= 3 else "")
 
 
 def is_allowed_iwaspoisoned_url(url: str, *, title: str = "", snippet: str = "") -> bool:

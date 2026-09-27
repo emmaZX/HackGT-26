@@ -222,6 +222,25 @@ def glance_title(*, brand: str | None, name: str | None) -> dict | None:
 
 def is_sensible_product(brand: str | None, name: str | None, *, slug: str | None = None) -> bool:
     """True if this row is OK to show on the home feed."""
+    # Never surface store-only shells — grocery banners are not products.
+    blob = f"{brand or ''} {name or ''} {slug or ''}".lower()
+    if re.search(r"\bin-?store food\b|\bstore food\b|\bgrocery purchase\b", blob):
+        return False
+    name_l = (name or "").strip().lower()
+    if name_l in {"in-store food", "instore food", "store food", "grocery item", "grocery purchase"}:
+        return False
+    # iWasPoisoned store pages often become "X Grocery" / "Hy-Vee Grocery Store".
+    if re.search(
+        r"("
+        r"\bgrocery(\s+(store|outlet|market|basket|supercenter))?\b|"
+        r"\bsupermarket\b|"
+        r"\bsupercenter\b|"
+        r"\bwholesale\s+club\b|"
+        r"\bneighborhood\s+market\b"
+        r")",
+        name_l,
+    ):
+        return False
     titled = glance_title(brand=brand, name=name)
     if not titled:
         return False

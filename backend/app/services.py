@@ -90,7 +90,7 @@ def list_feed(db: Session, city: str | None = None) -> dict:
     recent = (
         db.query(Report)
         .options(joinedload(Report.issue_links).joinedload(ReportIssue.issue), joinedload(Report.product))
-        .filter(Report.source.in_(("web", "reddit", "news", "community", "iwaspoisoned", "user")))
+        .filter(Report.source.in_(("web", "reddit", "news", "community", "iwaspoisoned", "x", "user")))
         .order_by(Report.created_at.desc())
         .limit(20)
         .all()

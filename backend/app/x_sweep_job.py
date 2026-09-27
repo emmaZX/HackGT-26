@@ -143,6 +143,7 @@ def save_posts(db: Session, posts: list[dict]) -> dict:
         product, created = _product(db, post["product_name"], post.get("brand"), post.get("category") or "Other food")
         new_products += int(created)
         text = post["text"]
+        when = _date(post.get("created_at"))
         report = Report(
             product_id=product.id,
             source="x",
@@ -150,7 +151,8 @@ def save_posts(db: Session, posts: list[dict]) -> dict:
             source_url=post["source_url"],
             text=text,
             excerpt=text[:280],
-            created_at=_date(post.get("created_at")),
+            created_at=when,
+            incident_date=when,
             location_label=post.get("location_label"),
             location_precision="city" if post.get("location_label") else "none",
             location_source="post" if post.get("location_label") else "none",

@@ -421,9 +421,11 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
                 r
                 for r in reports
                 if r.source_url
-                and r.source in {"web", "reddit", "news", "iwaspoisoned"}
-                and r.incident_date is not None
-                and within_recency(r.incident_date, days=settings.discovery_recency_days)
+                and r.source in {"web", "reddit", "news", "iwaspoisoned", "x", "community"}
+                and within_recency(
+                    r.incident_date or r.created_at,
+                    days=settings.discovery_recency_days,
+                )
             ]
             hosts = {(r.source_url or "") for r in url_reports}
             # Surface specific products from the scrape; multi-URL patterns rank higher.
