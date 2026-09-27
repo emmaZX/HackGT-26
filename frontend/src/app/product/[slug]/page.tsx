@@ -115,7 +115,7 @@ function ProductInner() {
       <h1 className="mt-[34px] font-mulish text-[32px] font-semibold leading-[1.1] tracking-[-0.04em] text-black md:text-[44px]">
         {product.name}
       </h1>
-      {product.brand && product.brand !== "Unknown" && (
+      {product.brand && product.brand !== "Unknown" && !product.name.toLowerCase().includes(product.brand.toLowerCase()) && (
         <p className="mt-2 font-raleway text-[15px] tracking-[-0.02em] text-[#627290]">{product.brand}</p>
       )}
       <p className="mt-3 inline-block rounded-md border border-[#d7dce8] bg-[#f7f8fb] px-3 py-1 text-[12px] font-semibold tracking-wide text-[#031d4e]">
@@ -249,12 +249,30 @@ function ProductInner() {
                   try {
                     const result = await api.discover(product.slug);
                     const agents = Array.isArray(result.agent_log) ? result.agent_log.length : 0;
-                    setDiscoverNote(
-                      result.provider
-                        ? `Agents searched via ${result.provider}: kept ${result.ingested} signal-grade pages` +
-                            (agents ? ` (${agents}-step pipeline).` : ".")
-                        : "Live web search is optional. Neighbor notes on this site still count.",
-                    );
+                    const rejectHints = Array.isArray(result.notes)
+                      ? result.notes.filter((n: string) => typeof n === "string" && n.startsWith("reject")).slice(0, 2)
+                      : [];
+                    if (result.skipped && (result.message || "").toLowerCase().includes("snapshot")) {
+                      setDiscoverNote(result.message || "Snapshot mode — live discovery is frozen.");
+                    } else if (!result.provider) {
+                      setDiscoverNote(
+                        result.message ||
+                          "No search API key is configured. Add EXA_API_KEY (or XAI/OpenAI) on the backend.",
+                      );
+                    } else if (result.ingested > 0) {
+                      setDiscoverNote(
+                        `Agents searched via ${result.provider}: kept ${result.ingested} signal-grade page` +
+                          (result.ingested === 1 ? "" : "s") +
+                          (agents ? ` (${agents}-step pipeline).` : "."),
+                      );
+                    } else {
+                      setDiscoverNote(
+                        result.message ||
+                          `Searched via ${result.provider} but kept 0 pages` +
+                            (rejectHints.length ? ` — ${rejectHints.join("; ")}` : ".") +
+                            " Try again later or check discovery_recency_days.",
+                      );
+                    }
                     load();
                   } finally {
                     setDiscovering(false);

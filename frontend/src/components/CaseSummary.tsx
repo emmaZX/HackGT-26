@@ -5,7 +5,7 @@ import { ReportCard } from "@/lib/types";
 import { isUsableSourceUrl } from "./EvidenceList";
 import { GrokBadge } from "./GrokBadge";
 
-type Summary = { summary: string | null; cited_ids?: number[]; report_count?: number };
+type Summary = { summary: string | null; cited_ids?: number[]; report_count?: number; model?: string };
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -44,7 +44,7 @@ export function CaseSummary({ slug, reports }: { slug: string; reports: ReportCa
     <section className="mt-10">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="section-title">What people are describing</h2>
-        <GrokBadge />
+        {data.model && data.model !== "fallback" && <GrokBadge />}
       </div>
       <p className="mt-4 max-w-[65ch] text-[16px] leading-relaxed text-[#031d4e]">
         {parts.map((part, i) => {
@@ -74,8 +74,9 @@ export function CaseSummary({ slug, reports }: { slug: string; reports: ReportCa
         })}
       </p>
       <p className="mt-2 text-[12px] text-[#627290]">
-        Summarized by Grok from {data.report_count === 1 ? "1 report" : `${data.report_count} reports`}. It can be
-        wrong: the numbers link to the reports it used.
+        {data.model && data.model !== "fallback"
+          ? `Summarized by Grok from ${data.report_count === 1 ? "1 report" : `${data.report_count} reports`}. It can be wrong: the numbers link to the reports it used.`
+          : `Based on ${data.report_count === 1 ? "1 linked report" : `${data.report_count} linked reports`}. Add XAI_API_KEY for a Grok-written summary.`}
       </p>
     </section>
   );

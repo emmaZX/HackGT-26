@@ -163,6 +163,17 @@ def bootstrap_catalog(db: Session) -> list[Product]:
     """Official overlays + evidence-backed community discovery. No invented watchlist illness."""
     settings = get_settings()
     ensure_issue_taxonomy(db)
+
+    if settings.snapshot_mode:
+        logger.info("SNAPSHOT_MODE=1 — serving frozen catalog (no scrub / overlays / crawls)")
+        return (
+            db.query(Product)
+            .filter(Product.category == "Food")
+            .order_by(Product.id)
+            .limit(max(1, settings.home_scrape_products) if settings.home_scrape_products else 40)
+            .all()
+        )
+
     purged = purge_placeholder_reports(db)
     if purged:
         logger.info("Removed %s placeholder example.com reports", purged)
@@ -178,6 +189,7 @@ def bootstrap_catalog(db: Session) -> list[Product]:
     purge_fake_community_data(db)
     purge_agency_internet_reports(db)
     scrub_catalog_quality(db)
+    backfill_official_notice_reports(db)
     db.commit()
 
     # Official + CAERS + real community web refresh in the background.
@@ -354,6 +366,7 @@ def purge_agency_internet_reports(db: Session) -> int:
     """
     Drop scraped CDC/FDA archive pages from the internet evidence list.
     Official status lives on Recall rows — agency HTML should not masquerade as neighbor chatter.
+    Keep intentional official-notice Report rows (source fda/fsis, source_id official-notice:…).
     """
     from .models import Embedding
 
@@ -363,10 +376,12 @@ def purge_agency_internet_reports(db: Session) -> int:
         .filter(Report.source_url.isnot(None), Report.is_user_generated.is_(False))
         .all()
     )
+    keep_sources = {"caers", "fda_outbreak", "fda", "fsis"}
     doomed = [
         r
         for r in reports
-        if r.source not in {"caers", "fda_outbreak"}
+        if r.source not in keep_sources
+        and not (r.source_id or "").startswith("official-notice:")
         and r.source_url
         and any(bit in r.source_url.lower() for bit in agency_bits)
     ]
@@ -598,13 +613,127 @@ def start_official_overlays_background() -> None:
                 _overlay_fda_recalls(db, limit=settings.fda_food_recall_limit)
                 _overlay_fsis_recalls(db, limit=settings.fsis_recall_limit)
                 _overlay_outbreaks(db, limit=settings.outbreak_limit)
+                backfill_official_notice_reports(db)
+                polish_catalog_titles(db)
+                pad_thin_official_with_web(db, limit=12)
                 db.commit()
+                try:
+                    from .feed_cache import invalidate
+
+                    invalidate()
+                except Exception:
+                    pass
                 logger.info("Official overlays refresh complete (FDA/FSIS/outbreaks)")
             except Exception:
                 logger.exception("Background official overlays failed")
                 db.rollback()
 
     threading.Thread(target=worker, name="official-overlays", daemon=True).start()
+
+
+def pad_thin_official_with_web(db: Session, limit: int = 12) -> int:
+    """
+    For Ongoing recall products that only have the official-notice Report,
+    search Exa/web for one more first-person page and attach it when valid.
+    Never invents URLs — only real search hits that pass evidence gates.
+    """
+    from .data_sources.web_search import available_provider, search_web
+    from .merge_products import clean_name, display_brand
+    from .pipeline.evidence_schema import (
+        is_allowed_iwaspoisoned_url,
+        parse_observed_at,
+        source_label_for_url,
+        validate_community_evidence,
+    )
+    from .pipeline.extract import extract_report
+    from sqlalchemy import func
+
+    if not available_provider():
+        return 0
+
+    # Official products with fewer than 2 non-duplicate reports.
+    thin = (
+        db.query(Product)
+        .join(Recall, Recall.product_id == Product.id)
+        .outerjoin(Report, Report.product_id == Product.id)
+        .filter(Recall.official.is_(True), Recall.reason.ilike("[ongoing]%"))
+        .group_by(Product.id)
+        .having(func.count(Report.id) < 2)
+        .limit(limit)
+        .all()
+    )
+    added = 0
+    for product in thin:
+        brand = display_brand(product.brand) or product.brand or ""
+        name = clean_name(product.name, product.brand) or product.name
+        queries = [
+            f'"{name}" food poisoning OR sick OR vomit site:reddit.com OR site:iwaspoisoned.com',
+            f"{brand} {name} grocery illness OR recall complaints",
+        ]
+        try:
+            hits = search_web(queries, limit_per_query=3)
+        except Exception:
+            logger.exception("pad web search failed for %s", product.slug)
+            continue
+        for hit in hits[:6]:
+            url = (hit.url or "").strip()
+            if not url:
+                continue
+            if db.query(Report).filter(Report.product_id == product.id, Report.source_url == url).first():
+                continue
+            if not is_allowed_iwaspoisoned_url(url, title=hit.title or "", snippet=hit.snippet or ""):
+                continue
+            observed = parse_observed_at(
+                text=f"{hit.title or ''}\n{hit.snippet or ''}",
+                url=url,
+                published=None,
+            )
+            if observed is None:
+                continue
+            evidence, reason = validate_community_evidence(
+                {
+                    "source_url": url,
+                    "excerpt": (hit.snippet or hit.title or name)[:500],
+                    "brand": brand[:120],
+                    "name": name[:180],
+                    "observed_at": observed,
+                    "triage_label": "first_person_complaint",
+                    "confidence": 0.55,
+                    "confidence_method": "heuristic",
+                    "location_label": None,
+                }
+            )
+            if not evidence:
+                continue
+            text = (hit.snippet or hit.title or evidence.excerpt)[:4000]
+            extract_report(text, f"{brand} {name}")
+            report = Report(
+                product_id=product.id,
+                source=source_label_for_url(url),
+                source_id=url[:240],
+                source_url=str(evidence.source_url)[:700],
+                title=(hit.title or name)[:300],
+                text=text,
+                excerpt=evidence.excerpt[:220],
+                incident_date=evidence.observed_at,
+                is_user_generated=False,
+                display_name=None,
+                location_label=None,
+                location_precision="none",
+                location_source="none",
+                extra_json='{"confidence":0.55,"method":"heuristic"}',
+            )
+            db.add(report)
+            db.flush()
+            try:
+                attach_and_dedupe(db, report)
+            except Exception:
+                pass
+            added += 1
+            break  # one pad per product
+    if added:
+        logger.info("Padded %s thin official products with web evidence", added)
+    return added
 
 
 def start_caers_refresh_background() -> None:
@@ -1523,29 +1652,58 @@ def _overlay_outbreaks(db: Session, limit: int = 20) -> None:
 
 
 def polish_catalog_titles(db: Session) -> int:
-    """Rewrite long notice-style titles already in SQLite into short item names."""
+    """Rewrite long notice-style titles into short shelf names: food first, brand after."""
+    from .merge_products import clean_name, display_brand
+
     changed = 0
-    products = (
-        db.query(Product)
-        .filter(
-            Product.category == "Food",
-            Product.slug.like("fsis-%")
-            | Product.slug.like("outbreak-%")
-            | Product.slug.like("caers-%")
-            | Product.slug.like("search-%"),
-        )
-        .all()
-    )
+    products = db.query(Product).filter(Product.category == "Food").all()
     for product in products:
-        titled = glance_title(brand=product.brand, name=product.name)
-        if not titled:
-            continue
-        brand, name = titled["brand"], titled["name"]
+        raw_name = product.name or ""
+        raw_brand = product.brand or ""
+        packaging_bits = []
+        for pat in (
+            r"\b(?:upc|sku|lot|batch)\s*(?:#|no\.?|number)?\s*[\w-]+",
+            r"\b\d+(?:[.,]\d+)?\s*(?:oz|lbs?|pounds?|g|kg|ml|fl\.?\s*oz)\b",
+            r"\bnet\s*(?:wt|weight)\b[^.;]*",
+            r"\b\d+\s*(?:lb|pound)\s*pouch(?:es)?\b",
+        ):
+            for m in re.finditer(pat, raw_name, re.I):
+                packaging_bits.append(m.group(0).strip())
+
+        brand = display_brand(raw_brand) or raw_brand or "Unknown"
+        name = clean_name(raw_name, raw_brand) or raw_name
+        titled = glance_title(brand=brand, name=name)
+        if titled:
+            brand, name = titled["brand"], titled["name"]
+        # Trailing junk left by FDA truncations ("Shake No", "Pepper Packaged").
+        name = re.sub(
+            r"\b(no|packaged|products?|item|variety|varieties|pha)\s*$",
+            "",
+            name,
+            flags=re.I,
+        ).strip(" ,-–—")
+        name = re.sub(r"^&\s*", "", name).strip()
+        if not name:
+            name = clean_name(raw_name, raw_brand) or "Food product"
+        brand = (brand or "Unknown")[:120]
+        name = name[:180]
+
         if product.slug.startswith("outbreak-") and brand in {"Unknown", ""}:
             brand = "FDA watch"
+
+        if packaging_bits:
+            detail = "; ".join(dict.fromkeys(packaging_bits))
+            existing = (product.summary or "").strip()
+            if detail.lower() not in existing.lower():
+                product.summary = (
+                    f"{existing} Packaging detail: {detail}.".strip()
+                    if existing
+                    else f"Packaging detail: {detail}."
+                )[:500]
+
         if (product.brand or "") != brand or (product.name or "") != name:
-            product.brand = brand[:120]
-            product.name = name[:180]
+            product.brand = brand
+            product.name = name
             changed += 1
     if changed:
         logger.info("Polished %s catalog item titles", changed)
@@ -1607,13 +1765,22 @@ def scrub_catalog_quality(db: Session) -> dict:
 
     # Collapse exact brand+name duplicates (keep newest recall / highest id).
     deduped = _dedupe_shelf_products(db)
+    try:
+        from .merge_products import merge_duplicate_products
+
+        merged = merge_duplicate_products(db, dry_run=False)
+        merge_n = int(merged.get("merged") or 0)
+    except Exception:
+        logger.exception("merge_duplicate_products failed during scrub")
+        merge_n = 0
 
     logger.info(
-        "Catalog scrub: fake=%s purged_recalls=%s deleted_products=%s deduped=%s",
+        "Catalog scrub: fake=%s purged_recalls=%s deleted_products=%s deduped=%s merged=%s",
         fake,
         purged_recalls,
         deleted,
         deduped,
+        merge_n,
     )
     return {
         "purged_recalls": purged_recalls,
@@ -1878,24 +2045,135 @@ def _attach_recall(db: Session, product: Product, item: dict) -> None:
         exists.reason = reason[:2000]
         exists.hazard = item["hazard"]
         exists.nationwide = item.get("nationwide", True)
+        _ensure_official_notice_report(db, product, exists if exists else None, item, reason)
         return
-    db.add(
-        Recall(
-            product_id=product.id,
-            agency=item["agency"],
-            recall_date=item["recall_date"],
-            reason=reason[:2000],
-            hazard=item["hazard"],
-            source_url=item["source_url"],
-            official=True,
-            nationwide=item.get("nationwide", True),
-        )
+    recall = Recall(
+        product_id=product.id,
+        agency=item["agency"],
+        recall_date=item["recall_date"],
+        reason=reason[:2000],
+        hazard=item["hazard"],
+        source_url=item["source_url"],
+        official=True,
+        nationwide=item.get("nationwide", True),
     )
+    db.add(recall)
+    db.flush()
+    _ensure_official_notice_report(db, product, recall, item, reason)
     if not product.summary or "watching" in (product.summary or "").lower():
         product.summary = (
-            f"People are posting illness reports about this product. "
-            f"An Ongoing {item['agency']} notice also exists ({item['hazard']})."
+            f"An Ongoing {item['agency']} notice is on record ({item['hazard']}). "
+            f"Linked community and web reports pad this page when available."
         )[:500]
+
+
+def _agency_report_source(agency: str) -> str:
+    upper = (agency or "").upper()
+    if "FSIS" in upper or "USDA" in upper:
+        return "fsis"
+    if "FDA" in upper:
+        return "fda"
+    return "fda"
+
+
+def _ensure_official_notice_report(
+    db: Session,
+    product: Product,
+    recall: Recall | None,
+    item: dict,
+    reason: str,
+) -> None:
+    """
+    Count the FDA/USDA notice as a Report so product-page stats are never empty
+    for an Ongoing recall. One report per source_url.
+    """
+    url = (item.get("source_url") or (recall.source_url if recall else "") or "").strip()
+    if not url:
+        return
+    agency = item.get("agency") or (recall.agency if recall else "FDA")
+    source = _agency_report_source(str(agency))
+    source_id = f"official-notice:{url}"[:240]
+    exists = (
+        db.query(Report)
+        .filter(Report.product_id == product.id, Report.source_id == source_id)
+        .first()
+    )
+    hazard = item.get("hazard") or (recall.hazard if recall else "") or "food safety hazard"
+    body = (
+        f"Official {agency} recall notice for {product.name}. "
+        f"Hazard: {hazard}. {reason}"
+    )[:4000]
+    excerpt = f"{agency} notice — {hazard}"[:220]
+    when = item.get("recall_date") or (recall.recall_date if recall else None) or datetime.utcnow()
+    if exists:
+        exists.title = f"{agency} recall: {product.name}"[:300]
+        exists.text = body
+        exists.excerpt = excerpt
+        exists.source_url = url[:700]
+        exists.incident_date = when if isinstance(when, datetime) else datetime.utcnow()
+        return
+    db.add(
+        Report(
+            product_id=product.id,
+            source=source,
+            source_id=source_id,
+            source_url=url[:700],
+            title=f"{agency} recall: {product.name}"[:300],
+            text=body,
+            excerpt=excerpt,
+            created_at=when if isinstance(when, datetime) else datetime.utcnow(),
+            incident_date=when if isinstance(when, datetime) else datetime.utcnow(),
+            is_user_generated=False,
+            display_name=str(agency)[:80],
+            location_label=None,
+            location_precision="unknown",
+            location_source="system",
+            independence_weight=1.0,
+            extra_json='{"confidence":1.0,"method":"official"}',
+        )
+    )
+
+
+def backfill_official_notice_reports(db: Session) -> int:
+    """One-shot: create Report rows for existing Ongoing recalls that lack them."""
+    added = 0
+    recalls = db.query(Recall).filter(Recall.official.is_(True)).all()
+    for recall in recalls:
+        if not (recall.reason or "").lower().startswith("[ongoing]"):
+            continue
+        if not recall.source_url:
+            continue
+        product = db.query(Product).filter(Product.id == recall.product_id).one_or_none()
+        if not product:
+            continue
+        source_id = f"official-notice:{recall.source_url}"[:240]
+        before = (
+            db.query(Report)
+            .filter(Report.product_id == product.id, Report.source_id == source_id)
+            .count()
+        )
+        _ensure_official_notice_report(
+            db,
+            product,
+            recall,
+            {
+                "agency": recall.agency,
+                "hazard": recall.hazard,
+                "source_url": recall.source_url,
+                "recall_date": recall.recall_date,
+            },
+            recall.reason or "",
+        )
+        after = (
+            db.query(Report)
+            .filter(Report.product_id == product.id, Report.source_id == source_id)
+            .count()
+        )
+        if after > before:
+            added += 1
+    if added:
+        logger.info("Backfilled %s official-notice reports", added)
+    return added
 
 
 def ensure_recall_from_discovery(db: Session, product: Product, coverage_pages: list[dict]) -> bool:

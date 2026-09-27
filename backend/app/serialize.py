@@ -25,11 +25,10 @@ def product_card(product: Product, signal: dict, local: bool = False) -> dict:
     }
 
 
-def _evidence_links(product: Product, signal: dict) -> list[dict]:
+def _evidence_links(product: Product, signal: dict, reports: list | None = None) -> list[dict]:
     """Linked public URLs for the card — never invent."""
-    reports = getattr(product, "reports", None)
     if reports is None:
-        return []
+        reports = getattr(product, "reports", None) or []
     out: list[dict] = []
     seen: set[str] = set()
     for report in reports:
@@ -81,8 +80,13 @@ def product_detail(product: Product, signal: dict, reports: list[Report], posts:
             "They identify patterns worth investigating — often before an official recall exists. "
             "No official recall does not mean a product is safe."
         )
+    # Attach reports so product_card / _evidence_links can include official + community URLs.
+    product.reports = reports
+    card = product_card(product, signal, local=False)
+    card["evidence"] = _evidence_links(product, signal, reports=reports)
+    card["evidence_count"] = len(card["evidence"])
     return {
-        **product_card(product, signal, local=False),
+        **card,
         "official_status": _official_status(signal),
         "reports": [report_card(report) for report in reports],
         "posts": [post_card(post) for post in posts],

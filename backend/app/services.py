@@ -50,14 +50,18 @@ def get_product(db: Session, slug: str) -> Product | None:
 
 
 def list_feed(db: Session, city: str | None = None) -> dict:
+    from .config import get_settings
     from .feed_cache import get as cache_get, set as cache_set
 
+    settings = get_settings()
     cached = cache_get(city)
     if cached is not None:
         return cached
 
     payload = _build_feed(db, city=city)
-    cache_set(city, payload)
+    # Snapshot demos: keep the same homepage payload for hours so restarts don't reshuffle feel.
+    ttl = 6 * 60 * 60.0 if settings.snapshot_mode else 45.0
+    cache_set(city, payload, ttl=ttl)
     return payload
 
 
@@ -102,51 +106,65 @@ def _build_feed(db: Session, city: str | None = None) -> dict:
     )[:10]
 
     def _hazard_urgency(c: dict) -> int:
-        """Higher = more urgent for a shopper. Pure heuristics — no model."""
+        """
+        Higher = more urgent for a shopper. Pure heuristics — no model.
+
+        Only score the official hazard/reason/pathogen labels. Scanning the full
+        press-release summary was matching incidental words (e.g. Listeria in a
+        long FSIS writeup, or "Inspection" in "Inspection Service") and ranking
+        a vague "Product Contamination" chicken salad above a real uninspected
+        meat recall.
+        """
+        import re as _re
+
         sig = c.get("signal") or {}
         recall = sig.get("official_recall") or {}
         outbreak = sig.get("outbreak") or {}
+        # Official fields only — not card title / long summary.
         blob = " ".join(
             str(x or "")
             for x in (
                 recall.get("hazard"),
                 recall.get("reason"),
                 outbreak.get("pathogen"),
-                c.get("name"),
-                c.get("summary"),
             )
         ).lower()
+        # Poundage may only appear in the product name / short summary line.
+        scale_blob = " ".join(
+            str(x or "")
+            for x in (c.get("name"), c.get("summary"), recall.get("reason"), recall.get("hazard"))
+        ).lower()
+
         score = 0
-        # Pathogen / acute foodborne risk
+        # Explicit uninspected production — high shopper impact, even without a pathogen name.
+        if _re.search(r"without\s+(the\s+)?benefit\s+of\s+inspection|produced\s+without\s+.*inspection", blob):
+            score += 70
+        # Named pathogens on the official label
         if any(k in blob for k in ("listeria", "botulism")):
             score += 55
         elif any(k in blob for k in ("e. coli", "ecoli", "e coli", "salmonella", "cyclospora")):
             score += 45
-        # Uninspected meat/poultry is a large shopper-facing FSIS event even without pathogen text.
-        if "without" in blob and "inspection" in blob:
-            score += 60
         if any(k in blob for k in ("undeclared", "allergen", "misbrand")):
             score += 25
-        if any(k in blob for k in ("contamination", "contaminat", "foreign material")):
+        # Vague "Product Contamination" alone is weaker than a named pathogen / uninspected meat.
+        if any(k in blob for k in ("foreign material",)):
             score += 20
-        if any(k in blob for k in ("import violation", "illegal")):
+        elif "contamination" in blob or "contaminat" in blob:
             score += 10
-        # Agency hint: FSIS product recalls are typically packaged meat at retail scale.
+        if "import violation" in blob:
+            score += 10
         agency = str((recall.get("agency") or "")).upper()
         if "FSIS" in agency or "USDA" in agency:
             score += 15
-        # Scale: larger recalls matter more when we can see pounds/cases.
-        import re as _re
-
-        m = _re.search(r"([\d,]+)\s*(?:lb|lbs|pounds)\b", blob)
+        m = _re.search(r"([\d,]+)\s*(?:lb|lbs|pounds)\b", scale_blob)
         if m:
             try:
                 lbs = int(m.group(1).replace(",", ""))
-                # Cap so one giant recall doesn't totally erase Class I produce.
-                score += min(40, lbs // 5000)
+                # Ignore tiny package sizes (5 lb pouch); reward bulk recalls.
+                if lbs >= 1000:
+                    score += min(40, lbs // 5000)
             except ValueError:
                 pass
-        # Class I language if present
         if "class i" in blob or "class 1" in blob:
             score += 30
         elif "class ii" in blob or "class 2" in blob:
@@ -157,7 +175,7 @@ def _build_feed(db: Session, city: str | None = None) -> dict:
         """
         Shopper urgency — NOT an AI rank.
         1) Official product recalls beat outbreak watches beat community beat CAERS
-        2) Within recalls: hazard severity + poundage, then newer date
+        2) Within recalls: hazard severity, then newer date, then volume signals
         """
         tier = c.get("source_tier") or c["signal"].get("source_tier") or "unofficial"
         sig = c.get("signal") or {}
@@ -170,10 +188,10 @@ def _build_feed(db: Session, city: str | None = None) -> dict:
             {"official": 0, "unofficial": 1, "caers": 2}.get(tier, 3),
             official_kind,
             -_hazard_urgency(c),
+            # Recency next — a newer uninspected-meat recall should beat an older vague contamination.
+            "".join(chr(255 - min(ord(ch), 255)) for ch in date),
             -(c.get("evidence_count") or sig.get("report_count") or 0),
             -float(sig.get("internal_strength") or 0),
-            # Invert ISO date so newer sorts first without a second pass.
-            "".join(chr(255 - min(ord(ch), 255)) for ch in date),
         )
 
     priority_foods = sorted(serialized, key=_prio)[:24]
@@ -207,6 +225,8 @@ def product_payload(db: Session, product: Product, issue_slug: str | None = None
     )
     if issue_slug:
         reports = [r for r in reports if any(link.issue.slug == issue_slug for link in r.issue_links)]
+    # So serialize._evidence_links / product_card can include official + community URLs.
+    product.reports = reports
     posts = (
         db.query(Post)
         .options(joinedload(Post.comments), joinedload(Post.likes))
@@ -379,7 +399,12 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
     discovery = None
     catalog_miss = not strong_products
     # Discover the exact brand online on a miss — still show related family hits meanwhile.
-    should_discover = available_provider() and len(q) >= 3 and (catalog_miss or live)
+    should_discover = (
+        not settings.snapshot_mode
+        and available_provider()
+        and len(q) >= 3
+        and (catalog_miss or live)
+    )
     if not live and strong_products:
         should_discover = False
     if should_discover and catalog_miss:
@@ -792,6 +817,16 @@ def run_discovery(
     force: bool = False,
 ) -> dict:
     settings = get_settings()
+    if settings.snapshot_mode:
+        product = get_product(db, product_slug)
+        return {
+            "provider": None,
+            "message": "Snapshot mode is on — live discovery is frozen for the demo.",
+            "hits": [],
+            "ingested": 0,
+            "skipped": True,
+            "product": product_payload(db, product) if product else None,
+        }
     product = get_product(db, product_slug)
     if not product:
         raise ValueError("Unknown product")
@@ -889,17 +924,31 @@ def run_discovery(
         if observed is None:
             notes.append(f"reject {final_url}: no observed_at")
             continue
+
+        from .merge_products import clean_name, display_brand
+        from .pipeline.evidence_schema import resolve_grocery_food_identity
+
+        page_identity = resolve_grocery_food_identity(
+            title=title,
+            text=f"{item.get('snippet') or ''}\n{text}",
+        )
+        brand_for_ev = display_brand(product.brand) or product.brand or ""
+        name_for_ev = clean_name(product.name, product.brand) or product.name or "Food item"
+        if page_identity:
+            brand_for_ev = page_identity[0] or brand_for_ev
+            name_for_ev = page_identity[1] or name_for_ev
+
         evidence, reason = validate_community_evidence(
             {
                 "source_url": final_url,
                 "excerpt": (item.get("snippet") or text)[:500],
-                "brand": product.brand or "",
-                "name": product.name or title or "Food item",
+                "brand": brand_for_ev[:120],
+                "name": name_for_ev[:180],
                 "observed_at": observed,
                 "triage_label": "first_person_complaint",
                 "confidence": float(triage.get("score") or 0.5),
                 "confidence_method": (triage.get("method") or "")
-                if (triage.get("method") or "") in {"gemini", "grok"}
+                if (triage.get("method") or "") in {"gemini", "grok", "heuristic"}
                 else "heuristic",
                 "location_label": None,
             }

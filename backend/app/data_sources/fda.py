@@ -152,12 +152,15 @@ def _normalize(row: dict) -> dict | None:
 
 
 def _short_product_name(description: str) -> str:
-    # First clause before packaging noise.
+    # First clause before packaging noise; strip UPC/lot/net-weight into cleaner shelf names.
+    from ..merge_products import clean_name
+
     chunk = re.split(r"[.;\n]", description, maxsplit=1)[0].strip()
     chunk = re.sub(r"\s+", " ", chunk)
-    if len(chunk) > 90:
-        chunk = chunk[:87].rsplit(" ", 1)[0] + "…"
-    return chunk or "Food product"
+    cleaned = clean_name(chunk) or chunk
+    if len(cleaned) > 90:
+        cleaned = cleaned[:87].rsplit(" ", 1)[0] + "…"
+    return cleaned or "Food product"
 
 
 def _short_firm(firm: str) -> str:

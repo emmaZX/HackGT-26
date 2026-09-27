@@ -62,6 +62,8 @@ export const api = {
       provider: string | null;
       message?: string;
       ingested: number;
+      skipped?: boolean;
+      notes?: string[];
       queries?: string[];
       agent_log?: { agent: string; [key: string]: unknown }[];
     }>(`/api/products/${slug}/discover`, {

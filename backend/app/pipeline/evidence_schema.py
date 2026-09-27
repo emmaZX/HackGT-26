@@ -89,7 +89,7 @@ class CommunityEvidence(BaseModel):
     observed_at: datetime
     triage_label: Literal["first_person_complaint"] = "first_person_complaint"
     confidence: float = Field(ge=0.42, le=1.0)
-    confidence_method: Literal["heuristic", "gemini", "grok", "user"] = "heuristic"
+    confidence_method: Literal["heuristic", "gemini", "grok", "user", "official"] = "heuristic"
     location_label: str | None = None
     source_host: str = ""
 

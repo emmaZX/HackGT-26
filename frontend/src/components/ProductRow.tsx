@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ProductCard as Product } from "@/lib/types";
+import { fullName } from "@/lib/headline";
 import { StatusBadge, isRecallTag, splitTags } from "./Tag";
 import { GrokBadge, isGrokSummary } from "./GrokBadge";
 
@@ -16,7 +17,7 @@ export function ProductRow({ product }: { product: Product }) {
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="border-b border-[#e0e3e9] pb-[3px] pr-3 font-mulish text-[14px] font-normal leading-tight tracking-[-0.04em] text-[#031d4e]">
-          {product.name}
+          {fullName(product)}
         </h3>
         {status && isRecallTag(status) && (
           <div className="-mr-[6px] -mt-[3px] shrink-0">

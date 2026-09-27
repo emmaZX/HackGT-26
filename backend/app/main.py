@@ -40,10 +40,17 @@ with SessionLocal() as session:
     home_products = bootstrap_catalog(session)
     home_slugs = [product.slug for product in home_products]
 
-start_home_scrape_background(home_slugs)
-start_cpsc_sync_background()
-start_image_lookup_background()
-start_venue_check_background()
+if not settings.snapshot_mode:
+    start_home_scrape_background(home_slugs)
+    start_cpsc_sync_background()
+    start_image_lookup_background()
+    start_venue_check_background()
+else:
+    import logging
+
+    logging.getLogger("app.main").info(
+        "SNAPSHOT_MODE on — skipped home scrape / CPSC / image lookup / venue check"
+    )
 
 
 def _warm_feed_cache() -> None:
@@ -123,8 +130,9 @@ def health():
     return {
         "ok": True,
         "app": settings.app_name,
-        "live_search": settings.has_live_search(),
-        "search_provider": available_provider(),
+        "snapshot_mode": settings.snapshot_mode,
+        "live_search": False if settings.snapshot_mode else settings.has_live_search(),
+        "search_provider": None if settings.snapshot_mode else available_provider(),
         "auth": settings.cognito_configured,
     }
 

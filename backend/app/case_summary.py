@@ -106,6 +106,39 @@ def generate(product: Product, reports: list[Report]) -> dict | None:
     return {"summary": summary[:900], "cited_ids": cited, "report_count": len(reports), "model": os.getenv("XAI_TEXT_MODEL", DEFAULT_TEXT_MODEL)}
 
 
+def _fallback_summary(product: Product, reports: list[Report]) -> dict:
+    """Readable summary when Grok isn't configured — still surfaces official + community text."""
+    official = [r for r in reports if (r.source_id or "").startswith("official-notice:") or r.source in {"fda", "fsis", "fda_outbreak"}]
+    community = [r for r in reports if r not in official]
+    parts: list[str] = []
+    if official:
+        r = official[0]
+        agency = r.display_name or r.source.upper()
+        parts.append(
+            f"An official {agency} notice is on record for this product"
+            + (f" ({r.excerpt})" if r.excerpt else "")
+            + f" [{r.id}]."
+        )
+    if community:
+        samples = community[:2]
+        cites = ", ".join(str(r.id) for r in samples)
+        parts.append(
+            f"{len(community)} linked public report"
+            + ("s" if len(community) != 1 else "")
+            + f" describe related shopper complaints [{cites}]."
+        )
+    elif not official:
+        r = reports[0]
+        parts.append(f"Public reports are linked for this product [{r.id}].")
+    summary = " ".join(parts).strip()
+    return {
+        "summary": summary[:900],
+        "cited_ids": [r.id for r in reports[:MAX_REPORTS]],
+        "report_count": len(reports),
+        "model": "fallback",
+    }
+
+
 @router.get("/api/products/{slug}/summary")
 def product_summary(slug: str):
     _load()
@@ -120,19 +153,21 @@ def product_summary(slug: str):
             .all()
         )
         reports = [r for r in reports if (r.text or r.excerpt)]
-        if not reports or not grok_available():
+        if not reports:
             return {"summary": None}
         sig = _signature(reports)
         cached = _cache.get(slug)
         if cached and cached.get("sig") == sig:
             return {k: v for k, v in cached.items() if k != "sig"}
-        try:
-            result = generate(product, reports)
-        except Exception as exc:
-            logger.warning("Case summary failed for %s: %s", slug, str(exc)[:120])
-            result = None
+        result = None
+        if grok_available():
+            try:
+                result = generate(product, reports)
+            except Exception as exc:
+                logger.warning("Case summary failed for %s: %s", slug, str(exc)[:120])
+                result = None
         if not result:
-            return {"summary": None}
+            result = _fallback_summary(product, reports)
         _cache[slug] = {**result, "sig": sig}
         _save()
         return result

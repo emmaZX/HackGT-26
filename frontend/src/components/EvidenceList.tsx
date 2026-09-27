@@ -11,10 +11,23 @@ const SOURCE_LABEL: Record<string, string> = {
   iwaspoisoned: "iWasPoisoned",
   fda: "FDA",
   fsis: "USDA-FSIS",
+  fda_outbreak: "FDA outbreak",
   X: "x",
+  x: "x",
 };
 
-const INTERNET_SOURCES = new Set(["web", "reddit", "news", "iwaspoisoned", "x"]);
+/** Official notices + public web pages that pad product evidence. */
+const INTERNET_SOURCES = new Set([
+  "web",
+  "reddit",
+  "news",
+  "iwaspoisoned",
+  "x",
+  "X",
+  "fda",
+  "fsis",
+  "fda_outbreak",
+]);
 
 export function isUsableSourceUrl(url: string | null | undefined): boolean {
   if (!url) return false;

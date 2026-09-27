@@ -119,7 +119,7 @@ export function PostModal({ onClose }: { onClose: () => void }) {
                 <Link
                   href={`/login?next=${encodeURIComponent(pathname || "/")}`}
                   onClick={onClose}
-                  className="grid h-[52px] w-[160px] place-items-center rounded-full bg-[#031d4e] font-raleway text-[16px] tracking-[-0.04em] text-white"
+                  className="btn-primary grid h-[52px] w-[160px] place-items-center font-raleway text-[16px] font-normal tracking-[-0.04em] !text-white"
                 >
                   Sign in
                 </Link>

@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     fsis_recall_limit: int = 100
     outbreak_limit: int = 40
 
+    # When true, serve the current DB as a frozen demo snapshot:
+    # no background crawls/overlays, no live discovery, no catalog scrub on boot.
+    # Default on for the hackathon demo; set SNAPSHOT_MODE=false to re-enable live refresh.
+    snapshot_mode: bool = True
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
