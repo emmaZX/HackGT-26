@@ -16,8 +16,8 @@ import { POSTED_EVENT } from "@/components/PostModal";
  */
 const SHOW_TIER_SECTIONS = false;
 
-const FEED_CACHE_KEY = "rmm-home-feed-v1";
-const FEED_CACHE_MAX_AGE_MS = 10 * 60 * 1000; // show stale up to 10 min while refreshing
+const FEED_CACHE_KEY = "rmm-home-feed-v2";
+const FEED_CACHE_MAX_AGE_MS = 30 * 1000; // paint stale briefly, then always soft-refresh
 
 function readCachedFeed(city: string | null): Feed | null {
   if (typeof window === "undefined") return null;
@@ -99,6 +99,33 @@ export default function HomePage() {
     : (feed?.important || []).filter((c) => (c.source_tier || c.signal.source_tier || "unofficial") === "unofficial");
 
   const nearbyGeo = feed?.nearby.flatMap((card) => card.signal.geography) || [];
+  // Snapshot demos often have no "nearby" until a city is chosen — still show map density
+  // from priority / official cards so the home map isn't empty.
+  const mapGeo = (() => {
+    const buckets = new Map<string, { label: string; count: number; latitude: number | null; longitude: number | null }>();
+    const sources = [
+      ...(feed?.nearby || []),
+      ...(feed?.priority_foods || []),
+      ...(feed?.important || []),
+    ];
+    for (const card of sources) {
+      for (const g of card.signal.geography || []) {
+        const prev = buckets.get(g.label);
+        if (!prev || g.count > prev.count) {
+          buckets.set(g.label, {
+            label: g.label,
+            count: g.count,
+            latitude: g.latitude ?? null,
+            longitude: g.longitude ?? null,
+          });
+        } else {
+          prev.count += g.count;
+        }
+      }
+    }
+    // Prefer nearby-only when the visitor city matched local cards.
+    return nearbyGeo.length ? nearbyGeo : Array.from(buckets.values());
+  })();
   // Prefer foods people near the visitor are reporting; fall back to urgent shelf.
   const mayUse = feed
     ? (feed.nearby.length
@@ -197,7 +224,7 @@ export default function HomePage() {
           <h2 id="area-title" className="section-title">
             In your area{city ? ` · ${city}` : ""}
           </h2>
-          <GeoMap geography={nearbyGeo} city={city} className="mt-[13px] h-[360px] md:h-[465px]" />
+          <GeoMap geography={mapGeo} city={city} className="mt-[13px] h-[360px] md:h-[465px]" />
         </section>
 
         <section aria-labelledby="use-title">

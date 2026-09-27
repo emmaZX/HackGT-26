@@ -50,18 +50,15 @@ def get_product(db: Session, slug: str) -> Product | None:
 
 
 def list_feed(db: Session, city: str | None = None) -> dict:
-    from .config import get_settings
-    from .feed_cache import get as cache_get, set as cache_set
+    from .feed_cache import content_revision, get as cache_get, set as cache_set
 
-    settings = get_settings()
-    cached = cache_get(city)
+    revision = content_revision(db)
+    cached = cache_get(city, revision)
     if cached is not None:
         return cached
 
     payload = _build_feed(db, city=city)
-    # Snapshot demos: keep the same homepage payload for hours so restarts don't reshuffle feel.
-    ttl = 6 * 60 * 60.0 if settings.snapshot_mode else 45.0
-    cache_set(city, payload, ttl=ttl)
+    cache_set(city, payload, revision=revision)
     return payload
 
 
@@ -775,6 +772,9 @@ def add_comment(db: Session, post_id: int, payload: dict, user: AuthUser) -> dic
     )
     db.add(comment)
     db.commit()
+    from .feed_cache import invalidate
+
+    invalidate()
     post = (
         db.query(Post)
         .options(joinedload(Post.comments), joinedload(Post.likes))
@@ -799,6 +799,9 @@ def toggle_like(db: Session, post_id: int, user: AuthUser) -> dict:
     else:
         db.add(Like(post_id=post.id, display_name=user.display_name, user_sub=user.sub))
     db.commit()
+    from .feed_cache import invalidate
+
+    invalidate()
     post = (
         db.query(Post)
         .options(joinedload(Post.comments), joinedload(Post.likes))

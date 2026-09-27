@@ -48,9 +48,16 @@ export function GeoMap({
   const map = useRef<LeafletMap | null>(null);
   const layer = useRef<LayerGroup | null>(null);
   const places = geography
-    .map((g) => ({ ...g, city: CITIES.find((c) => c.label === g.label) }))
-    .filter((g) => g.city);
-  const key = JSON.stringify(places.map((p) => [p.label, p.count])) + (city || "");
+    .map((g) => {
+      const known = CITIES.find((c) => c.label === g.label);
+      if (known) return { label: g.label, count: g.count, lat: known.lat, lng: known.lng };
+      if (g.latitude != null && g.longitude != null) {
+        return { label: g.label, count: g.count, lat: g.latitude, lng: g.longitude };
+      }
+      return null;
+    })
+    .filter((g): g is { label: string; count: number; lat: number; lng: number } => Boolean(g));
+  const key = JSON.stringify(places.map((p) => [p.label, p.count, p.lat, p.lng])) + (city || "");
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +78,7 @@ export function GeoMap({
 
       layer.current!.clearLayers();
       for (const p of places) {
-        L.circleMarker([p.city!.lat, p.city!.lng], {
+        L.circleMarker([p.lat, p.lng], {
           radius: Math.min(22, 7 + p.count * 2),
           color: "#ff96a6",
           weight: 2,
@@ -85,11 +92,11 @@ export function GeoMap({
       const home = CITIES.find((c) => c.label === city) || DEFAULT;
       if (places.length > 1) {
         map.current.fitBounds(
-          L.latLngBounds(places.map((p) => [p.city!.lat, p.city!.lng] as [number, number])),
+          L.latLngBounds(places.map((p) => [p.lat, p.lng] as [number, number])),
           { padding: [60, 60], maxZoom: 11 },
         );
       } else if (places.length === 1) {
-        map.current.setView([places[0].city!.lat, places[0].city!.lng], 11);
+        map.current.setView([places[0].lat, places[0].lng], 11);
       } else {
         map.current.setView([home.lat, home.lng], 11);
       }

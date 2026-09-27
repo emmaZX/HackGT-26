@@ -158,7 +158,9 @@ def product_summary(slug: str):
         sig = _signature(reports)
         cached = _cache.get(slug)
         if cached and cached.get("sig") == sig:
-            return {k: v for k, v in cached.items() if k != "sig"}
+            # Don't keep a non-Grok fallback once XAI_API_KEY is available.
+            if not (grok_available() and cached.get("model") == "fallback"):
+                return {k: v for k, v in cached.items() if k != "sig"}
         result = None
         if grok_available():
             try:
