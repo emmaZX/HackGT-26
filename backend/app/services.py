@@ -96,6 +96,30 @@ def _build_feed(db: Session, city: str | None = None) -> dict:
     important = (unofficial[:8] + official[:6] + caers_spikes[:4])[:18]
     # Local shelf: any card with geography matching the visitor city (not just important).
     nearby = [card for card in serialized if card.get("local")]
+
+    def _local_weight(card: dict) -> tuple:
+        """Prefer products with more reports in the visitor's city/metro."""
+        city_l = (city or "").strip().lower()
+        metros = {
+            "atlanta": {"atlanta", "marietta", "decatur"},
+            "marietta": {"atlanta", "marietta", "decatur"},
+            "decatur": {"atlanta", "marietta", "decatur"},
+        }
+        aliases = metros.get(city_l, {city_l} if city_l else set())
+        geo = (card.get("signal") or {}).get("geography") or []
+        local_count = sum(
+            int(g.get("count") or 0)
+            for g in geo
+            if (g.get("label") or "").strip().lower() in aliases
+        )
+        sig = card.get("signal") or {}
+        return (
+            -local_count,
+            -int(sig.get("report_count") or 0),
+            -float(sig.get("internal_strength") or 0),
+        )
+
+    nearby.sort(key=_local_weight)
     trending = sorted(
         [card for card in (unofficial + official) if card["signal"].get("velocity_percent")],
         key=lambda card: card["signal"]["velocity_percent"] or 0,

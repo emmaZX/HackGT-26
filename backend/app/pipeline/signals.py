@@ -487,7 +487,16 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
                 continue
         local = False
         if visitor_city:
-            local = any(visitor_city.lower() == g["label"].lower() for g in signal["geography"])
+            # Treat Atlanta / Marietta / Decatur as one metro so "near you" isn't empty
+            # when neighbors reported from a suburb.
+            metros = {
+                "atlanta": {"atlanta", "marietta", "decatur"},
+                "marietta": {"atlanta", "marietta", "decatur"},
+                "decatur": {"atlanta", "marietta", "decatur"},
+            }
+            want = visitor_city.strip().lower()
+            aliases = metros.get(want, {want})
+            local = any((g.get("label") or "").strip().lower() in aliases for g in signal["geography"])
         # Final quality gate — never show legalese / unidentified junk on home.
         from .glance_titles import is_sensible_product
 

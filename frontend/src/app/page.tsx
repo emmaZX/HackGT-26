@@ -72,16 +72,18 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!cityReady) return;
-    const cached = readCachedFeed(city);
+    // No saved city → treat as Atlanta for the local shelf / map (demo default).
+    const effectiveCity = city || "Atlanta";
+    const cached = readCachedFeed(effectiveCity);
     if (cached) {
       setFeed(cached);
       setLoading(false);
       // Refresh in background — page already looks full.
-      load(city, { soft: true });
+      load(effectiveCity, { soft: true });
     } else {
-      load(city);
+      load(effectiveCity);
     }
-    const refresh = () => load(city, { soft: true });
+    const refresh = () => load(effectiveCity, { soft: true });
     window.addEventListener(POSTED_EVENT, refresh);
     return () => window.removeEventListener(POSTED_EVENT, refresh);
   }, [city, cityReady, load]);
@@ -126,15 +128,8 @@ export default function HomePage() {
     // Prefer nearby-only when the visitor city matched local cards.
     return nearbyGeo.length ? nearbyGeo : Array.from(buckets.values());
   })();
-  // Prefer foods people near the visitor are reporting; fall back to urgent shelf.
-  const mayUse = feed
-    ? (feed.nearby.length
-        ? feed.nearby
-        : feed.priority_foods?.length
-          ? feed.priority_foods
-          : [...official, ...unofficial, ...caers]
-      ).slice(0, 4)
-    : null;
+  // Local-only shelf — never fall back to national Priority foods.
+  const mayUse = feed ? (feed.nearby || []).slice(0, 4) : null;
   const priorityFoods = (feed?.priority_foods?.length
     ? feed.priority_foods
     : [...official, ...unofficial, ...caers]
@@ -222,17 +217,15 @@ export default function HomePage() {
       <div className="mt-10 grid gap-10 lg:grid-cols-[710px_1fr] lg:gap-[53px]">
         <section aria-labelledby="area-title">
           <h2 id="area-title" className="section-title">
-            In your area{city ? ` · ${city}` : ""}
+            In your area · {city || "Atlanta"}
           </h2>
-          <GeoMap geography={mapGeo} city={city} className="mt-[13px] h-[360px] md:h-[465px]" />
+          <GeoMap geography={mapGeo} city={city || "Atlanta"} className="mt-[13px] h-[360px] md:h-[465px]" />
         </section>
 
         <section aria-labelledby="use-title">
           <h2 id="use-title" className="section-title">Products you may use</h2>
           <p className="mt-2 max-w-[40ch] text-[13px] leading-relaxed text-[#627290]">
-            {city
-              ? `Grocery foods people near ${city} are linking reports about.`
-              : "Set your city above to see grocery foods reported near you."}
+            Grocery foods neighbors near {city || "Atlanta"} are talking about — not the national priority list.
           </p>
           <div className="mt-[23px] grid gap-[17px]">
             {mayUse?.length
@@ -241,9 +234,7 @@ export default function HomePage() {
                 ? Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton h-[86px]" />)
                 : (
                   <p className="text-sm text-[#627290]">
-                    {city
-                      ? "No local grocery reports yet — Priority foods below still cover national notices."
-                      : "Choose a city to personalize this list."}
+                    No local grocery reports near {city || "Atlanta"} yet. Priority foods below still cover national notices.
                   </p>
                 )}
           </div>
