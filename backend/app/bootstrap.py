@@ -16,9 +16,14 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .data_sources.fda import fetch_recent_food_recalls
+from .data_sources.fsis import fetch_active_recalls as fetch_fsis_recalls
+from .data_sources.outbreaks import fetch_active_outbreaks
+from .data_sources.caers import fetch_recent_events as fetch_caers_events, product_key as caers_product_key
 from .database import SessionLocal
 from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Recall, Report, ReportIssue
 from .pipeline.cluster import attach_and_dedupe
+from .pipeline.product_identity import simplify_food_item
+from .pipeline.spikes import score_caers_spike, summarize_caers_spike
 from .seed import ISSUES, seed
 
 logger = logging.getLogger(__name__)
@@ -191,8 +196,13 @@ def bootstrap_catalog(db: Session) -> list[Product]:
 
     purge_agency_internet_reports(db)
 
-    # Always refresh FDA overlay in the background so recall status stays accurate.
-    start_fda_overlay_background()
+    # Short grocery-style titles for anything already in SQLite.
+    polish_catalog_titles(db)
+    db.commit()
+
+    # Official + CAERS overlays refresh in the background so API startup stays fast.
+    start_official_overlays_background()
+    start_caers_refresh_background()
 
     home = (
         db.query(Product)
@@ -247,7 +257,9 @@ def purge_agency_internet_reports(db: Session) -> int:
     doomed = [
         r
         for r in reports
-        if r.source_url and any(bit in r.source_url.lower() for bit in agency_bits)
+        if r.source not in {"caers", "fda_outbreak"}
+        and r.source_url
+        and any(bit in r.source_url.lower() for bit in agency_bits)
     ]
     if not doomed:
         return 0
@@ -453,39 +465,333 @@ def _match_watch_product(watch: dict[str, Product], item: dict) -> Product | Non
 
 
 def start_fda_overlay_background() -> None:
-    """Refresh FDA recall attachments without blocking API startup."""
+    """Back-compat alias — prefer start_official_overlays_background."""
+    start_official_overlays_background()
+
+
+def start_official_overlays_background() -> None:
+    """Refresh FDA + FSIS recalls and outbreak watches without blocking startup."""
 
     def worker() -> None:
         settings = get_settings()
         with SessionLocal() as db:
             try:
                 _overlay_fda_recalls(db, limit=settings.fda_food_recall_limit)
+                _overlay_fsis_recalls(db, limit=settings.fsis_recall_limit)
+                _overlay_outbreaks(db, limit=settings.outbreak_limit)
                 db.commit()
-                logger.info("FDA overlay refresh complete")
+                logger.info("Official overlays refresh complete (FDA/FSIS/outbreaks)")
             except Exception:
-                logger.exception("Background FDA overlay failed")
+                logger.exception("Background official overlays failed")
                 db.rollback()
 
-    threading.Thread(target=worker, name="fda-overlay", daemon=True).start()
+    threading.Thread(target=worker, name="official-overlays", daemon=True).start()
+
+
+def start_caers_refresh_background() -> None:
+    """Ingest CAERS events and summarize spikes only."""
+
+    def worker() -> None:
+        settings = get_settings()
+        with SessionLocal() as db:
+            try:
+                _overlay_caers(db)
+                db.commit()
+                logger.info("CAERS refresh complete")
+            except Exception:
+                logger.exception("Background CAERS refresh failed")
+                db.rollback()
+
+    threading.Thread(target=worker, name="caers-refresh", daemon=True).start()
+
+
+def _overlay_fsis_recalls(db: Session, limit: int = 25) -> None:
+    """Attach active USDA-FSIS recalls as grocery-style product items."""
+    settings = get_settings()
+    recalls = fetch_fsis_recalls(
+        limit=max(limit, 80),
+        max_age_days=settings.official_recall_max_age_days,
+    )
+    if not recalls:
+        logger.warning("FSIS overlay: no active recalls fetched")
+        return
+    watch = {p.slug: p for p in db.query(Product).filter(Product.category == "Food").all()}
+    fsis_extra = 0
+    max_extra = max(limit, 60)
+    for item in recalls:
+        # Always keep item titles short / generic.
+        polished = simplify_food_item(
+            brand=item.get("brand"),
+            name=item.get("name"),
+            fallback="Meat / poultry",
+        )
+        item["brand"] = polished["brand"]
+        item["name"] = polished["name"]
+
+        matched = _match_watch_product(watch, item)
+        if matched:
+            _attach_recall(db, matched, item)
+            continue
+        existing = db.query(Product).filter(Product.slug == item["slug"]).first()
+        if existing:
+            existing.brand = item["brand"][:120]
+            existing.name = item["name"][:180]
+            if item.get("summary"):
+                existing.summary = item["summary"][:500]
+            _attach_recall(db, existing, item)
+            continue
+        if fsis_extra >= max_extra:
+            continue
+        product = Product(
+            slug=item["slug"][:160],
+            brand=item["brand"],
+            name=item["name"],
+            category="Food",
+            summary=(
+                item.get("summary")
+                or f"Active USDA-FSIS recall: {item.get('hazard')}"
+            )[:500],
+        )
+        db.add(product)
+        db.flush()
+        _attach_recall(db, product, item)
+        watch[product.slug] = product
+        fsis_extra += 1
+    polish_catalog_titles(db)
+    logger.info("FSIS overlay attached (extra SKUs=%s, pool=%s)", fsis_extra, len(recalls))
+
+
+def _overlay_outbreaks(db: Session, limit: int = 20) -> None:
+    """Upsert FDA outbreak investigation cards as food items — no fake Recall rows."""
+    rows = fetch_active_outbreaks(limit=limit)
+    for item in rows:
+        slug = item["slug"][:160]
+        polished = simplify_food_item(
+            brand=item.get("brand"),
+            name=item.get("name"),
+            fallback="Food item",
+        )
+        brand = polished["brand"] if polished["brand"] not in {"Unknown"} else "FDA watch"
+        name = polished["name"]
+        product = db.query(Product).filter(Product.slug == slug).first()
+        if not product:
+            product = Product(
+                slug=slug,
+                brand=brand[:120],
+                name=name[:180],
+                category="Food",
+                summary=item["summary"][:500],
+            )
+            db.add(product)
+            db.flush()
+        else:
+            product.summary = item["summary"][:500]
+            product.name = name[:180]
+            product.brand = brand[:120]
+
+        meta = (
+            f"ref:{item['ref_id']}|pathogen:{item['pathogen']}|"
+            f"cases:{item.get('case_count') or ''}|product:{item.get('product_status') or ''}|"
+            f"active:true"
+        )
+        exists = (
+            db.query(Report)
+            .filter(Report.source == "fda_outbreak", Report.source_id == item["ref_id"])
+            .first()
+        )
+        if exists:
+            exists.text = meta
+            exists.excerpt = item["summary"][:220]
+            exists.source_url = item["source_url"]
+            exists.title = f"FDA outbreak #{item['ref_id']}: {item['pathogen']}"
+            continue
+        report = Report(
+            product_id=product.id,
+            source="fda_outbreak",
+            source_id=item["ref_id"],
+            source_url=item["source_url"],
+            title=f"FDA outbreak #{item['ref_id']}: {item['pathogen']}",
+            text=meta,
+            excerpt=item["summary"][:220],
+            created_at=item.get("date_posted") or datetime.utcnow(),
+            is_user_generated=False,
+            display_name="FDA Outbreak Table",
+            location_label=None,
+            location_precision="unknown",
+            location_source="system",
+        )
+        db.add(report)
+    polish_catalog_titles(db)
+    logger.info("Outbreak overlay upserted %s active investigations", len(rows))
+
+
+def polish_catalog_titles(db: Session) -> int:
+    """Rewrite long notice-style titles already in SQLite into short item names."""
+    changed = 0
+    products = (
+        db.query(Product)
+        .filter(
+            Product.category == "Food",
+            Product.slug.like("fsis-%")
+            | Product.slug.like("outbreak-%")
+            | Product.slug.like("caers-%"),
+        )
+        .all()
+    )
+    for product in products:
+        polished = simplify_food_item(
+            brand=product.brand,
+            name=product.name,
+            fallback="Food item",
+        )
+        brand = polished["brand"]
+        name = polished["name"]
+        if product.slug.startswith("outbreak-") and brand in {"Unknown", ""}:
+            brand = "FDA watch"
+        if (product.brand or "") != brand or (product.name or "") != name:
+            product.brand = brand[:120]
+            product.name = name[:180]
+            changed += 1
+    if changed:
+        logger.info("Polished %s catalog item titles", changed)
+    return changed
+
+
+def _overlay_caers(db: Session) -> None:
+    """Ingest CAERS events, upsert products, score spikes, Gemini-summarize spikes only."""
+    settings = get_settings()
+    events = fetch_caers_events(
+        lookback_days=settings.caers_lookback_days,
+        fetch_limit=settings.caers_fetch_limit,
+    )
+    if not events:
+        logger.warning("CAERS overlay: no events fetched")
+        return
+
+    # Aggregate by product key; keep top entities by volume for the demo shelf.
+    buckets: dict[str, list[dict]] = {}
+    for event in events:
+        key = caers_product_key(event["brand"], event["name"])
+        buckets.setdefault(key, []).append(event)
+
+    ranked = sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)
+    # Cap entity count so SQLite stays snappy — but keep a large grocery shelf.
+    top = ranked[:120]
+    spiked = 0
+    for key, items in top:
+        sample = items[0]
+        slug = f"caers-{key}"[:160]
+        polished = simplify_food_item(
+            brand=sample["brand"],
+            name=sample["name"],
+            fallback="Food item",
+        )
+        # Skip FOIA / nonsense labels that slipped through.
+        if re.search(r"\bexemption\s*4\b", f"{polished['brand']} {polished['name']}", re.I):
+            continue
+        product = db.query(Product).filter(Product.slug == slug).first()
+        if not product:
+            product = Product(
+                slug=slug,
+                brand=polished["brand"][:120],
+                name=polished["name"][:180],
+                category="Food",
+                summary="FDA CAERS adverse event reports on file — not an official recall.",
+            )
+            db.add(product)
+            db.flush()
+        else:
+            product.brand = polished["brand"][:120]
+            product.name = polished["name"][:180]
+
+        for event in items:
+            source_id = f"{event['report_number']}:{key}"
+            exists = (
+                db.query(Report)
+                .filter(Report.source == "caers", Report.source_id == source_id)
+                .first()
+            )
+            if exists:
+                continue
+            reactions = ", ".join(event.get("reactions") or []) or "adverse event"
+            text = (
+                f"CAERS report {event['report_number']} for {event['label']}. "
+                f"Reported reactions: {reactions}."
+            )
+            report = Report(
+                product_id=product.id,
+                source="caers",
+                source_id=source_id,
+                source_url=event["source_url"],
+                title=f"CAERS: {event['label'][:120]}",
+                text=text[:4000],
+                excerpt=text[:220],
+                created_at=event["date"],
+                is_user_generated=False,
+                display_name="FDA CAERS",
+                location_label=None,
+                location_precision="unknown",
+                location_source="system",
+            )
+            db.add(report)
+        db.flush()
+
+        spike = score_caers_spike(db, product.id)
+        if spike.get("is_spike"):
+            spiked += 1
+            samples = (
+                db.query(Report)
+                .filter(Report.product_id == product.id, Report.source == "caers")
+                .order_by(Report.created_at.desc())
+                .limit(8)
+                .all()
+            )
+            label = f"{product.brand} {product.name}".strip()
+            product.summary = summarize_caers_spike(label, [r.text for r in samples])[:500]
+
+    polish_catalog_titles(db)
+    logger.info(
+        "CAERS overlay: %s events → %s entities, %s spikes",
+        len(events),
+        len(top),
+        spiked,
+    )
 
 
 def purge_non_ongoing_recalls(db: Session) -> int:
-    """Remove terminated / completed / unknown historical recalls — only Ongoing stays."""
+    """Remove terminated / completed / stale / unknown historical recalls — only recent Ongoing stays."""
+    settings = get_settings()
+    max_age = settings.official_recall_max_age_days
+    cutoff = datetime.utcnow() - timedelta(days=max(14, max_age))
     doomed: list[Recall] = []
     for recall in db.query(Recall).filter(Recall.official.is_(True)).all():
         status = "unknown"
         reason = recall.reason or ""
+        # Repair stringified-list reasons from older FSIS parses.
+        if reason.startswith("['") or reason.startswith('["'):
+            cleaned = reason.strip("[]'\" ")
+            recall.reason = f"[Ongoing] {cleaned}"[:2000]
+            reason = recall.reason
         if reason.startswith("[") and "]" in reason[:40]:
             status = reason[1 : reason.index("]")].strip().lower()
         else:
-            status = "unknown"
+            # FSIS/FDA rows missing the Ongoing stamp — keep USDA-FSIS and re-stamp.
+            if (recall.agency or "").upper().find("FSIS") >= 0:
+                recall.reason = f"[Ongoing] {reason}"[:2000]
+                status = "ongoing"
+            else:
+                status = "unknown"
+        # Age out resolved / no-longer-urgent notices from the home shelf.
+        if recall.recall_date and recall.recall_date < cutoff:
+            doomed.append(recall)
+            continue
         if status == "ongoing":
             continue
         doomed.append(recall)
     for recall in doomed:
         db.delete(recall)
     if doomed:
-        logger.info("Purged %s non-Ongoing FDA recalls", len(doomed))
+        logger.info("Purged %s non-Ongoing or stale official recalls", len(doomed))
     return len(doomed)
 
 
@@ -496,15 +802,25 @@ def _attach_recall(db: Session, product: Product, item: dict) -> None:
     exists = (
         db.query(Recall)
         .filter(Recall.product_id == product.id, Recall.source_url == item["source_url"])
-        .one_or_none()
+        .first()
     )
-    if exists:
-        return
-    reason = item["reason"]
-    # Persist openFDA status in reason prefix so UI can distinguish Ongoing vs past
+    reason = str(item.get("reason") or "").strip()
+    # Persist openFDA/FSIS status in reason prefix so UI can distinguish Ongoing vs past
     # without a schema migration.
-    if status and not reason.startswith("["):
-        reason = f"[{status}] {reason}"
+    if reason.startswith("[") and "]" in reason[:40]:
+        # Re-stamp known Ongoing attachments so agency overlays stay visible.
+        inner = reason[1 : reason.index("]")].strip().lower()
+        if inner != "ongoing":
+            reason = reason[reason.index("]") + 1 :].strip()
+            reason = f"[Ongoing] {reason}"
+    else:
+        reason = f"[Ongoing] {reason}" if reason else "[Ongoing] Official recall"
+    if exists:
+        exists.agency = item["agency"]
+        exists.reason = reason[:2000]
+        exists.hazard = item["hazard"]
+        exists.nationwide = item.get("nationwide", True)
+        return
     db.add(
         Recall(
             product_id=product.id,

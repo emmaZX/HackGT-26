@@ -50,14 +50,23 @@ class Settings(BaseSettings):
     seed_fake_posts: bool = True
     cpsc_recall_limit: int = 25
     fda_food_recall_limit: int = 25
-    # Light home scrape — keep Exa/Brave credit burn low.
-    home_scrape_products: int = 2
+    # Light home scrape — default 0 so category Exa is not the home filler.
+    home_scrape_products: int = 0
     home_scrape_pages: int = 3
     home_scrape_queries: int = 1
     search_scrape_pages: int = 5
     discovery_cooldown_minutes: int = 20
     # Prefer recent complaints / Ongoing notices (days).
     discovery_recency_days: int = 90
+
+    # CAERS spike engine
+    caers_lookback_days: int = 270
+    caers_fetch_limit: int = 3000
+    caers_spike_min_reports: int = 5
+    caers_spike_velocity: float = 2.0
+    official_recall_max_age_days: int = 120
+    fsis_recall_limit: int = 80
+    outbreak_limit: int = 30
 
     @property
     def cors_origin_list(self) -> list[str]:

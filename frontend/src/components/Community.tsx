@@ -36,6 +36,8 @@ export function Community({
       });
       setBody("");
       onChange();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not share that post.");
     } finally {
       setBusy(false);
     }

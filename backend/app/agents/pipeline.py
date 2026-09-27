@@ -49,9 +49,38 @@ def run_agent_pipeline(
     )
     agent_log = [{"agent": "query_generator", "queries": queries}]
 
-    # 2) Web Search (Exa / Brave / Gemini)
+    # 2) Web Search (Exa / Brave / Gemini) — primary unofficial pass
     provider, hits = search_niche(queries, limit_per_query=5)
     agent_log.append({"agent": "web_search", "provider": provider, "hit_count": len(hits)})
+
+    # 2b) Best-effort Reddit-restricted supplementary pass (logged even when empty)
+    product_label = f"{product.brand} {product.name}".strip()
+    reddit_query = (
+        f'site:reddit.com "{product_label}" '
+        f'(sick OR vomiting OR diarrhea OR "food poisoning" OR nauseous)'
+    )
+    reddit_hits: list = []
+    try:
+        _rp, reddit_hits = search_niche([reddit_query], limit_per_query=5)
+        seen_urls = {
+            getattr(h, "url", None) or (h.get("url") if isinstance(h, dict) else None) for h in hits
+        }
+        for hit in reddit_hits:
+            url = getattr(hit, "url", None) or (hit.get("url") if isinstance(hit, dict) else None)
+            if url and url not in seen_urls:
+                hits.append(hit)
+                seen_urls.add(url)
+    except Exception:
+        reddit_hits = []
+    notes: list[str] = [f"reddit_restricted: hits={len(reddit_hits)}"]
+    agent_log.append(
+        {
+            "agent": "reddit_restricted",
+            "query": reddit_query,
+            "hit_count": len(reddit_hits),
+            "note": "best-effort supplementary pass — not core coverage",
+        }
+    )
 
     if not provider:
         return {
@@ -60,7 +89,7 @@ def run_agent_pipeline(
             "hits": [],
             "candidates": [],
             "recall_coverage": [],
-            "notes": ["no search provider"],
+            "notes": notes + ["no search provider"],
             "agent_log": agent_log,
         }
 
@@ -81,7 +110,6 @@ def run_agent_pipeline(
 
     # 4 + 5) Triage + Geo
     settings = get_settings()
-    notes: list[str] = []
     candidates: list[dict] = []
     coverage: list[dict] = []
     product_hint = f"{product.brand} {product.name}"

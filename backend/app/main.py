@@ -116,6 +116,7 @@ def product(slug: str, issue: str | None = None, db: Session = Depends(get_db)):
 
 @app.get("/api/search")
 def search(q: str = "", live: bool = True, db: Session = Depends(get_db)):
+    # Empty catalog always triggers live discovery (see search_catalog).
     return search_catalog(db, q, live=live)
 
 

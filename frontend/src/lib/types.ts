@@ -5,6 +5,25 @@ export type Location = {
   precision: string;
 };
 
+export type SourceTier = "official" | "caers" | "unofficial";
+
+export type SpikeMetrics = {
+  recent_count: number;
+  baseline_weekly: number;
+  velocity_ratio: number;
+  window_days: number;
+  is_spike?: boolean;
+};
+
+export type OutbreakInfo = {
+  ref: string;
+  pathogen: string;
+  cases: string | null;
+  active: boolean;
+  product_status?: string | null;
+  source_url?: string | null;
+};
+
 export type Signal = {
   signal_type: string;
   severity_key: string;
@@ -31,6 +50,10 @@ export type Signal = {
     phase?: "ongoing" | "past" | string;
   } | null;
   components: Record<string, number>;
+  source_tier?: SourceTier;
+  spike?: SpikeMetrics | null;
+  outbreak?: OutbreakInfo | null;
+  internet_before_official?: boolean;
 };
 
 export type ProductCard = {
@@ -47,6 +70,7 @@ export type ProductCard = {
   signal: Signal;
   local: boolean;
   tags: string[];
+  source_tier?: SourceTier;
 };
 
 export type ReportCard = {
@@ -108,6 +132,9 @@ export type ProductDetail = ProductCard & {
 
 export type Feed = {
   important: ProductCard[];
+  official?: ProductCard[];
+  caers_spikes?: ProductCard[];
+  unofficial?: ProductCard[];
   nearby: ProductCard[];
   trending: ProductCard[];
   recent_reports: ReportCard[];

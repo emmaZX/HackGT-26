@@ -32,7 +32,10 @@ export const api = {
     request<import("./types").ProductDetail>(
       `/api/products/${slug}${issue ? `?issue=${encodeURIComponent(issue)}` : ""}`,
     ),
-  search: (q: string) => request<SearchResult>(`/api/search?q=${encodeURIComponent(q)}`),
+  search: (q: string, live = true) =>
+    request<SearchResult>(
+      `/api/search?q=${encodeURIComponent(q)}${live ? "&live=true" : "&live=false"}`,
+    ),
   locations: (q: string) =>
     request<{ locations: LocationHit[] }>(`/api/locations?q=${encodeURIComponent(q)}`),
   report: (payload: Record<string, unknown>) =>

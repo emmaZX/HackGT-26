@@ -55,14 +55,13 @@ def _heuristic_queries(
     illness = '("threw up" OR vomiting OR diarrhea OR "food poisoning" OR "got sick" OR nauseous)'
     batch = '(lot OR batch OR "use by" OR "best by" OR "sell by")'
     recent = f"({year} OR \"this week\" OR \"last month\" OR recently OR today)"
-    unofficial = "(site:reddit.com OR site:iwaspoisoned.com OR site:facebook.com OR nextdoor OR discord)"
-    # Prefer first-person chatter on unofficial platforms — never lead with "recall".
+    # Primary unofficial path: iWasPoisoned / grocery illness chatter — not category watches.
     queries = [
-        f'{product} site:reddit.com {illness} {recent}',
         f'site:iwaspoisoned.com {product}',
-        f'{product} {unofficial} {illness} {recent}',
+        f'site:iwaspoisoned.com {product} (grocery OR sick OR restaurant)',
+        f'{product} {illness} (grocery OR Costco OR Walmart OR "food poisoning") {recent} -site:fda.gov',
         f'{product} {illness} (family OR "my kids" OR "three people" OR household) {recent}',
-        f'{product} {batch} {illness} site:reddit.com',
+        f'{product} {batch} {illness} site:iwaspoisoned.com',
         f'"{product}" ("taste weird" OR "smell weird" OR "off smell") (sick OR vomiting) {recent}',
     ]
     if recall_hint:
@@ -70,14 +69,14 @@ def _heuristic_queries(
         if hazard:
             queries.insert(
                 0,
-                f'{product} {" ".join(hazard)} site:reddit.com OR site:iwaspoisoned.com sick OR illness {recent}',
+                f'{product} {" ".join(hazard)} site:iwaspoisoned.com OR site:reddit.com sick OR illness {recent}',
             )
     else:
         queries = [q for q in queries if " recall " not in f" {q.lower()} "]
     if extra:
-        queries.insert(0, f"{product} {extra} site:reddit.com OR site:iwaspoisoned.com {recent}")
+        queries.insert(0, f"{product} {extra} site:iwaspoisoned.com {recent}")
     if (category or "").lower() == "food":
-        queries.append(f'{product} site:reddit.com ("1 star" OR "threw away") (sick OR vomiting) {recent}')
+        queries.append(f'{product} site:iwaspoisoned.com ("1 star" OR sick OR vomiting) {recent}')
     return queries
 
 

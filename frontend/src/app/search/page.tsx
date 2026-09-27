@@ -21,17 +21,40 @@ function SearchInner() {
       setLoading(false);
       return;
     }
+    let cancelled = false;
     setResult(null);
     setError(null);
     setLoading(true);
-    api
-      .search(q)
-      .then((data) => {
-        setResult(data);
-        setError(null);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "Search failed"))
-      .finally(() => setLoading(false));
+
+    (async () => {
+      try {
+        // Fast catalog pass first.
+        const local = await api.search(q, false);
+        if (cancelled) return;
+        const localEmpty =
+          local.products.length === 0 && local.reports.length === 0 && local.semantic.length === 0;
+        if (!localEmpty) {
+          setResult(local);
+          setLoading(false);
+          return;
+        }
+        // Nothing in catalog — search the open web and add a product.
+        setResult(local);
+        const live = await api.search(q, true);
+        if (cancelled) return;
+        setResult(live);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Search failed");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [q]);
 
   const empty =
@@ -44,11 +67,15 @@ function SearchInner() {
     <div>
       <h1 className="serif text-4xl">Look something up</h1>
       <p className="mt-2 text-[#627290]">
-        Try a brand, a product name, or a plain-English problem like “smells like burning plastic.”
+        Try a brand, a product, or plain English — “raw meat”, “got sick after”, “iwaspoisoned”.
       </p>
       {!q && <p className="mt-8 text-[#627290]">Type a few words in the search box above.</p>}
       {q && loading && (
-        <p className="mt-8 text-[#627290]">Looking across the public web for related reports…</p>
+        <p className="mt-8 text-[#627290]">
+          {result && result.products.length === 0
+            ? "Nothing in the catalog yet — searching iWasPoisoned / Reddit / the open web and adding a listing…"
+            : "Looking up matching foods…"}
+        </p>
       )}
       {error && <p className="mt-8 text-sm text-[#d9546a]">{error}</p>}
       {empty && !loading && <NotFoundPrompt query={q} />}

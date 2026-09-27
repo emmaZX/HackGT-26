@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..models import Product, Recall, Report, ReportIssue
 from .cluster import cluster_strength_from_reports
+from .spikes import score_caers_spike
 
 # ---------------------------------------------------------------------------
 # Signal methodology (MVP, intentionally replaceable)
@@ -178,6 +180,39 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
                 "not as proof that early posts predicted the recall."
             )
 
+    outbreak = _outbreak_from_reports(reports, product)
+    spike = None
+    caers_reports = [r for r in reports if r.source == "caers"]
+    if caers_reports:
+        spike = score_caers_spike(db, product.id, now=now)
+        if not spike.get("is_spike"):
+            spike = {**spike, "is_spike": False}
+
+    source_tier = _source_tier(
+        official=official,
+        outbreak=outbreak,
+        spike=spike,
+        caers_count=len(caers_reports),
+        slug=product.slug or "",
+    )
+
+    if outbreak and not official:
+        why = (
+            f"FDA outbreak investigation #{outbreak['ref']} ({outbreak['pathogen']}) is active. "
+            f"Linked product status: {outbreak.get('product_status') or 'see advisory'}. "
+            "This is an official investigation watch — not the same as a product recall "
+            "unless a recall was separately initiated."
+        )
+    elif spike and spike.get("is_spike") and source_tier == "caers":
+        why = (
+            product.summary
+            or (
+                f"CAERS adverse-event reports rose to {spike['recent_count']} in the last "
+                f"{spike['window_days']} days vs a weekly baseline of {spike['baseline_weekly']} "
+                f"({spike['velocity_ratio']}×). Not an official recall — reports are unverified."
+            )
+        )
+
     return {
         "signal_type": key,
         "severity_key": key,
@@ -196,6 +231,9 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
         "explanation": why,
         "official_recall": _serialize_recall(official) if official else None,
         "internet_before_official": internet_before_official,
+        "source_tier": source_tier,
+        "spike": spike if (spike and spike.get("is_spike")) else None,
+        "outbreak": outbreak,
         "components": {
             "recent_report_velocity": round(velocity_component, 3),
             "source_diversity": round(source_div, 3),
@@ -204,6 +242,60 @@ def compute_signal(db: Session, product: Product, now: datetime | None = None) -
             "deviation_from_historical_baseline": round(baseline_component, 3),
             "independence": round(independence_component, 3),
         },
+    }
+
+
+def _source_tier(*, official, outbreak, spike, caers_count: int = 0, slug: str = "") -> str:
+    if official or outbreak:
+        return "official"
+    # CAERS-backed grocery items belong in the CAERS tier (spike is a tag, not the only entry).
+    if caers_count > 0 or slug.startswith("caers-"):
+        return "caers"
+    if spike and spike.get("is_spike"):
+        return "caers"
+    return "unofficial"
+
+
+def _outbreak_from_reports(reports: list[Report], product: Product) -> dict | None:
+    outbreak_reports = [r for r in reports if r.source == "fda_outbreak"]
+    if not outbreak_reports and not (product.slug or "").startswith("outbreak-"):
+        return None
+    ref = (product.slug or "").replace("outbreak-", "", 1) if (product.slug or "").startswith("outbreak-") else ""
+    pathogen = ""
+    cases = None
+    product_status = None
+    source_url = None
+    active = True
+    for report in outbreak_reports:
+        source_url = source_url or report.source_url
+        title = report.title or ""
+        if "ref:" in (report.text or ""):
+            # text may be "ref:1417|pathogen:…|cases:…|product:…"
+            parts = dict(
+                part.split(":", 1) for part in (report.text or "").split("|") if ":" in part
+            )
+            ref = parts.get("ref", ref)
+            pathogen = parts.get("pathogen", pathogen)
+            cases = parts.get("cases") or cases
+            product_status = parts.get("product") or product_status
+            if parts.get("active", "true").lower() in {"0", "false", "no"}:
+                active = False
+        elif not pathogen and title:
+            pathogen = title
+    if not ref and product.slug and product.slug.startswith("outbreak-"):
+        ref = product.slug.split("outbreak-", 1)[-1]
+    if not ref:
+        return None
+    if not pathogen:
+        # Fall back to product name "Pathogen — Product"
+        pathogen = (product.name or "").split("—")[0].strip() or "Foodborne pathogen"
+    return {
+        "ref": ref,
+        "pathogen": pathogen,
+        "cases": cases,
+        "active": active,
+        "product_status": product_status,
+        "source_url": source_url,
     }
 
 
@@ -260,18 +352,56 @@ def _serialize_recall(recall: Recall) -> dict:
 
 def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
     cards = []
-    # Home feed is food / watchlist first — keep the payload small and fast.
-    products = (
+    # Prefer products that already have official / outbreak / CAERS evidence,
+    # then fill with remaining food SKUs.
+    from sqlalchemy import or_
+
+    from ..models import Recall
+
+    official_ids = {
+        r.product_id
+        for r in db.query(Recall.product_id).filter(Recall.official.is_(True)).all()
+    }
+    clauses = [
+        Product.slug.like("outbreak-%"),
+        Product.slug.like("fsis-%"),
+        Product.slug.like("caers-%"),
+    ]
+    if official_ids:
+        clauses.insert(0, Product.id.in_(official_ids))
+    special = (
         db.query(Product)
-        .filter(Product.category == "Food")
+        .filter(Product.category == "Food", or_(*clauses))
         .order_by(Product.id)
-        .limit(40)
+        .limit(200)
         .all()
     )
+    special_ids = [p.id for p in special] or [-1]
+    extras = (
+        db.query(Product)
+        .filter(Product.category == "Food", ~Product.id.in_(special_ids))
+        .order_by(Product.id)
+        .limit(80)
+        .all()
+    )
+    products = special + extras
     for product in products:
         signal = compute_signal(db, product)
-        if signal["severity_key"] == "no_significant_signal" and not signal["official_recall"]:
+        tier = signal.get("source_tier") or "unofficial"
+        # Keep official, CAERS grocery items, and unofficial clusters with signal.
+        if tier == "official":
+            pass
+        elif tier == "caers":
+            # Drop FOIA noise / empty shells.
+            if (product.slug or "").startswith("caers-") and signal.get("report_count", 0) < 1:
+                continue
+            if re.search(r"exemption\s*4", f"{product.brand} {product.name}", re.I):
+                continue
+        elif signal["severity_key"] == "no_significant_signal" and not signal["official_recall"]:
             continue
+        else:
+            if (product.slug or "").startswith("caers-"):
+                continue
         local = False
         if visitor_city:
             local = any(visitor_city.lower() == g["label"].lower() for g in signal["geography"])
@@ -279,23 +409,28 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
 
     def sort_key(item: dict) -> tuple:
         signal = item["signal"]
-        key = signal["severity_key"]
-        official = bool(signal.get("official_recall"))
-        emerging = key in {"strong_emerging_signal", "emerging_signal", "elevated_reports"}
-        humanish = signal.get("source_diversity", 0) >= 0.2 or signal.get("report_count", 0) >= 3
-        # Internet-first: emerging without FDA, then emerging FDA later confirmed,
-        # then official-only shelves. Prefer cards that still look human-sourced.
-        if emerging and not official:
-            tier = 0
-        elif emerging and official:
-            tier = 1
-        elif official:
-            tier = 2
-        else:
-            tier = 3
-        before = 0 if signal.get("internet_before_official") else 1
-        human = 0 if humanish else 1
-        return (tier, human, before, -signal.get("internal_strength", 0), -signal.get("report_count", 0))
+        tier = signal.get("source_tier") or "unofficial"
+        tier_rank = {"official": 0, "caers": 1, "unofficial": 2}.get(tier, 3)
+        spike_ratio = -((signal.get("spike") or {}).get("velocity_ratio") or 0)
+        # Mix outbreak watches and recalls (don't bury FSIS under outbreaks).
+        has_outbreak = 0 if signal.get("outbreak") else 1
+        has_recall = 0 if signal.get("official_recall") else 1
+        # Prefer items that have either official signal; among them prefer recalls slightly
+        # so meat/poultry FSIS cards aren't crowded out by every outbreak row.
+        official_kind = 0 if signal.get("official_recall") else (1 if signal.get("outbreak") else 2)
+        recall_date = ""
+        if signal.get("official_recall"):
+            recall_date = signal["official_recall"].get("recall_date") or ""
+        return (
+            tier_rank,
+            official_kind,
+            has_outbreak,
+            has_recall,
+            spike_ratio,
+            # Newer recall dates first (ISO strings sort lexicographically).
+            f"_{recall_date}",
+            -signal.get("internal_strength", 0),
+            -signal.get("report_count", 0),
+        )
 
-    cards.sort(key=sort_key)
-    return cards
+    return sorted(cards, key=sort_key)

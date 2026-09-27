@@ -94,6 +94,15 @@ function ProductInner() {
   const sources = product.reports.filter((r) => r.source_url);
   const internet = product.reports.filter(isInternetReport);
   const onSite = product.reports.filter(isSiteReport);
+  const tier = product.source_tier || signal.source_tier || "unofficial";
+  const tierLabel =
+    tier === "official"
+      ? signal.outbreak
+        ? "Official · outbreak watch"
+        : "Official · confirmed notice"
+      : tier === "caers"
+        ? "CAERS · FDA-hosted reports (not a recall)"
+        : "Unofficial · community / open web";
 
   return (
     <div>
@@ -101,6 +110,25 @@ function ProductInner() {
       <h1 className="mt-[34px] font-mulish text-[32px] font-semibold leading-[1.1] tracking-[-0.04em] text-black md:text-[44px]">
         {product.name}
       </h1>
+      {product.brand && product.brand !== "Unknown" && (
+        <p className="mt-2 font-raleway text-[15px] tracking-[-0.02em] text-[#627290]">{product.brand}</p>
+      )}
+      <p className="mt-3 inline-block rounded-md border border-[#d7dce8] bg-[#f7f8fb] px-3 py-1 text-[12px] font-semibold tracking-wide text-[#031d4e]">
+        {tierLabel}
+      </p>
+      {tier === "caers" && (
+        <p className="mt-2 max-w-[65ch] text-[13px] leading-relaxed text-[#627290]">
+          Adverse event reports from FDA CAERS — not an official recall. Reports are unverified and do not prove causation.
+        </p>
+      )}
+      {signal.outbreak && (
+        <p className="mt-2 max-w-[65ch] text-[13px] leading-relaxed text-[#627290]">
+          FDA outbreak investigation #{signal.outbreak.ref}
+          {signal.outbreak.pathogen ? ` · ${signal.outbreak.pathogen}` : ""}.
+          {signal.outbreak.product_status ? ` Product status: ${signal.outbreak.product_status}.` : ""}
+          {" "}This watch is not the same as a product recall unless a recall was separately initiated.
+        </p>
+      )}
 
       <div className="mt-5 grid items-start gap-[38px] lg:grid-cols-[1fr_387px]">
         {/* Left: the case */}

@@ -1,10 +1,13 @@
 import { ProductCard } from "./types";
 
-/** Brand + name without saying the brand twice ("Acme" + "Acme X100" → "Acme X100") */
+/** Notable product title first; brand after when it adds something. */
 export function fullName(p: ProductCard) {
   const brand = p.brand && p.brand !== "Unknown" ? p.brand : "";
-  if (!brand || p.name.toLowerCase().startsWith(brand.toLowerCase())) return p.name;
-  return `${brand} ${p.name}`;
+  const title = p.name?.trim() || "Unknown product";
+  if (!brand) return title;
+  if (title.toLowerCase().includes(brand.toLowerCase())) return title;
+  if (brand.toLowerCase().includes(title.toLowerCase())) return brand;
+  return `${title} · ${brand}`;
 }
 
 /** "Burn hazard" → "burn risk"; long or generic hazards are dropped */
@@ -25,22 +28,20 @@ function activeRecall(p: ProductCard) {
 export function headline(p: ProductCard) {
   const s = p.signal;
   const recall = activeRecall(p);
-  const brand = p.brand && p.brand !== "Unknown" ? p.brand : "";
+  const title = fullName(p);
 
   if (recall) {
     const why = shortHazard(recall.hazard);
-    const base = brand && !p.name.toLowerCase().startsWith(brand.toLowerCase())
-      ? `${brand} recalls ${p.name}`
-      : `${p.name} recalled`;
+    const base = `${title} recalled`;
     return why ? `${base} over ${why}` : base;
   }
 
   const people = s.independent_count || s.report_count;
-  if (!people) return fullName(p);
+  if (!people) return title;
   const top = [...s.issues].sort((a, b) => b.count - a.count)[0];
   const who = people === 1 ? "1 person reports" : `${people} people report`;
   const what = top ? top.name.toLowerCase() : "problems";
-  return `${who} ${what} with the ${fullName(p)}`;
+  return `${who} ${what} with ${title}`;
 }
 
 const STATUS_TEXT: Record<string, string> = {

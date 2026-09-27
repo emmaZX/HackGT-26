@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import or_
@@ -17,6 +18,7 @@ from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Recall, R
 from .pipeline.cluster import attach_and_dedupe
 from .pipeline.embeddings import similar_reports
 from .pipeline.extract import extract_report
+from .pipeline.food_families import related_food_keywords
 from .pipeline.signals import compute_signal, feed_cards
 from .security import sanitize_text, snap_coordinate
 from .serialize import post_card, product_card, product_detail, report_card
@@ -49,22 +51,64 @@ def get_product(db: Session, slug: str) -> Product | None:
 
 def list_feed(db: Session, city: str | None = None) -> dict:
     cards = feed_cards(db, visitor_city=city)
-    important = [product_card(item["product"], item["signal"], item["local"]) for item in cards[:8]]
+    serialized = [product_card(item["product"], item["signal"], item["local"]) for item in cards]
+
+    official = [c for c in serialized if (c.get("source_tier") or c["signal"].get("source_tier")) == "official"]
+    caers_spikes = [
+        c for c in serialized if (c.get("source_tier") or c["signal"].get("source_tier")) == "caers"
+    ]
+    unofficial = [
+        c for c in serialized if (c.get("source_tier") or c["signal"].get("source_tier")) == "unofficial"
+    ]
+
+    def _official_recency(card: dict) -> float:
+        recall = (card.get("signal") or {}).get("official_recall") or {}
+        date = recall.get("recall_date") or ""
+        # ISO date sorts lexicographically; missing dates sink.
+        return date or "0000-00-00"
+
+    # Newest / most urgent official items first (Star Meat-class recalls before old PHAs).
+    official.sort(key=_official_recency, reverse=True)
+    recalls = [c for c in official if c["signal"].get("official_recall")]
+    outbreaks = [c for c in official if c["signal"].get("outbreak") and not c["signal"].get("official_recall")]
+    interleaved_official: list = []
+    for i in range(max(len(recalls), len(outbreaks))):
+        if i < len(recalls):
+            interleaved_official.append(recalls[i])
+        if i < len(outbreaks):
+            interleaved_official.append(outbreaks[i])
+    official = interleaved_official
+
+    # Home hero: community / conjecture first, then a thin recent-official slice.
+    important = (unofficial[:8] + official[:6] + caers_spikes[:4])[:18]
     nearby = [card for card in important if card["local"]]
     trending = sorted(
-        [card for card in important if card["signal"].get("velocity_percent")],
+        [card for card in (unofficial + official) if card["signal"].get("velocity_percent")],
         key=lambda card: card["signal"]["velocity_percent"] or 0,
         reverse=True,
-    )[:6]
+    )[:10]
     recent = (
         db.query(Report)
         .options(joinedload(Report.issue_links).joinedload(ReportIssue.issue), joinedload(Report.product))
+        .filter(Report.source.in_(("web", "reddit", "news", "community", "iwaspoisoned", "user")))
         .order_by(Report.created_at.desc())
-        .limit(10)
+        .limit(20)
         .all()
     )
+    # Fall back if filters emptied the list.
+    if not recent:
+        recent = (
+            db.query(Report)
+            .options(joinedload(Report.issue_links).joinedload(ReportIssue.issue), joinedload(Report.product))
+            .order_by(Report.created_at.desc())
+            .limit(20)
+            .all()
+        )
     return {
         "important": important,
+        "official": official[:20],
+        "caers_spikes": caers_spikes[:24],
+        "unofficial": unofficial[:30],
         "nearby": nearby,
         "trending": trending,
         "recent_reports": [
@@ -73,8 +117,9 @@ def list_feed(db: Session, city: str | None = None) -> dict:
         ],
         "visitor_city": city,
         "disclaimer": (
-            "Early internet clusters are a heads-up, not a verdict. "
-            "Official recalls stay official. The point is seeing the pattern before — or without — an FDA page."
+            "Home leads with community / iWasPoisoned / Reddit-style reports. "
+            "Official FDA/FSIS items are recent Ongoing notices only — resolved or stale recalls are removed. "
+            "CAERS is FDA-hosted complaint data, not a recall."
         ),
     }
 
@@ -121,33 +166,116 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
     if not q:
         return {"query": q, "products": [], "reports": [], "semantic": [], "discovery": None}
 
+    tokens = [t for t in re.split(r"[^a-z0-9]+", q.lower()) if len(t) >= 2]
+    # Synonym expansion so "raw meat" hits pork/beef/goat FSIS items.
+    expanded = set(tokens)
+    if "meat" in expanded:
+        expanded.update({"pork", "beef", "goat", "poultry", "turkey", "chicken", "sausage"})
+    if "poison" in expanded or "poisoned" in expanded:
+        expanded.update({"iwaspoisoned", "sick", "vomiting", "diarrhea"})
+    # Family expansion: "haagen dazs" → ice cream / dairy / gelato, etc.
+    related_kws = related_food_keywords(q)
+    for kw in related_kws:
+        for part in re.split(r"\s+", kw.lower()):
+            if len(part) >= 3:
+                expanded.add(part)
+    token_list = list(expanded)[:20]
+
     like = f"%{q}%"
-    products = (
-        db.query(Product)
-        .filter(
-            or_(
-                Product.name.ilike(like),
-                Product.brand.ilike(like),
-                Product.model.ilike(like),
-                Product.category.ilike(like),
-                Product.upc.ilike(like),
-                Product.slug.ilike(like),
-                Product.summary.ilike(like),
-            )
+    clauses = [
+        Product.name.ilike(like),
+        Product.brand.ilike(like),
+        Product.model.ilike(like),
+        Product.category.ilike(like),
+        Product.upc.ilike(like),
+        Product.slug.ilike(like),
+        Product.summary.ilike(like),
+    ]
+    for token in token_list:
+        tok = f"%{token}%"
+        clauses.extend(
+            [
+                Product.name.ilike(tok),
+                Product.brand.ilike(tok),
+                Product.slug.ilike(tok),
+                Product.summary.ilike(tok),
+            ]
         )
-        .all()
-    )
+    # Multi-word family phrases as wholes ("ice cream", "frozen yogurt").
+    for kw in related_kws:
+        if " " in kw:
+            phrase = f"%{kw}%"
+            clauses.extend(
+                [
+                    Product.name.ilike(phrase),
+                    Product.brand.ilike(phrase),
+                    Product.summary.ilike(phrase),
+                ]
+            )
+
+    products = db.query(Product).filter(or_(*clauses)).limit(60).all()
+
+    def _blob(p: Product) -> str:
+        return f"{p.brand} {p.name} {p.slug} {p.summary or ''}".lower()
+
+    def _related_hits(p: Product) -> int:
+        blob = _blob(p)
+        score = 0
+        for kw in related_kws:
+            key = kw.lower()
+            if " " in key:
+                if key in blob:
+                    score += 2
+                continue
+            # Single-token family cues — skip short/ambiguous ones.
+            if key in {"cream", "pint", "milk", "dairy", "dessert", "spread"}:
+                continue
+            if len(key) >= 4 and re.search(rf"\b{re.escape(key)}\b", blob):
+                score += 1
+        return score
+
+    def _rank_product(p: Product) -> tuple:
+        blob = _blob(p)
+        phrase = 0 if q.lower() in blob else 1
+        hits = sum(1 for t in tokens if t in blob)
+        related = _related_hits(p)
+        return (phrase, -hits, -related, p.id)
+
+    products = sorted(products, key=_rank_product)
+
+    # Strong hits = user's brand/words; related = same food family (ice cream, dairy…).
+    def _is_strong(p: Product) -> bool:
+        blob = _blob(p)
+        if q.lower() in blob:
+            return True
+        if not tokens:
+            return False
+        hits = sum(1 for t in tokens if t in blob)
+        need = max(1, (len(tokens) + 1) // 2)
+        return hits >= need
+
+    strong_products = [p for p in products if _is_strong(p)]
+    related_products = [
+        p for p in products if not _is_strong(p) and _related_hits(p) > 0
+    ][:16]
+
     reports = (
         db.query(Report)
         .options(joinedload(Report.product), joinedload(Report.issue_links).joinedload(ReportIssue.issue))
-        .filter(or_(Report.text.ilike(like), Report.title.ilike(like)))
+        .filter(
+            or_(
+                Report.text.ilike(like),
+                Report.title.ilike(like),
+                *[Report.text.ilike(f"%{t}%") for t in tokens[:6]],
+            )
+        )
         .order_by(Report.created_at.desc())
         .limit(20)
         .all()
     )
     semantic = similar_reports(db, q, limit=12)
     # Weak embedding hits should not hide a true miss.
-    if not products and not reports:
+    if not strong_products and not reports:
         semantic = [(report, score) for report, score in semantic if score >= 0.72]
     semantic_products: dict[int, dict] = {}
     for report, score in semantic:
@@ -162,52 +290,79 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
         card["score"] = max(card["score"], score)
 
     discovery = None
-    if live and available_provider() and len(q) >= 3:
-        if products:
-            target = products[0]
-            web_count = (
-                db.query(Report)
-                .filter(
-                    Report.product_id == target.id,
-                    Report.source.in_(("web", "reddit", "news")),
-                )
-                .count()
-            )
-            if web_count < 4:
-                discovery = run_discovery(
-                    db,
-                    target.slug,
-                    extra=q,
-                    max_pages=settings.search_scrape_pages,
-                    force=False,
-                )
-                refreshed = get_product(db, target.slug)
-                if refreshed:
-                    products = [refreshed] + [p for p in products if p.id != target.id]
-        else:
+    catalog_miss = not strong_products
+    # Discover the exact brand online on a miss — still show related family hits meanwhile.
+    should_discover = available_provider() and len(q) >= 3 and (catalog_miss or live)
+    if not live and strong_products:
+        should_discover = False
+    if should_discover and catalog_miss:
+        try:
             discovery = discover_from_query(db, q)
             if discovery.get("product"):
-                slug = discovery["product"]["slug"]
-                found = get_product(db, slug)
+                slug = discovery["product"].get("slug") if isinstance(discovery["product"], dict) else None
+                found = get_product(db, slug) if slug else None
                 if found:
-                    products = [found]
+                    strong_products = [found]
+                    products = [found] + [p for p in products if p.id != found.id]
+                    reports = (
+                        db.query(Report)
+                        .options(
+                            joinedload(Report.product),
+                            joinedload(Report.issue_links).joinedload(ReportIssue.issue),
+                        )
+                        .filter(Report.product_id == found.id)
+                        .order_by(Report.created_at.desc())
+                        .limit(20)
+                        .all()
+                    )
+        except Exception as exc:
+            discovery = {
+                "provider": None,
+                "ingested": 0,
+                "message": f"Live search failed ({exc}). Try again in a moment.",
+            }
 
-    product_cards = [product_card(product, compute_signal(db, product)) for product in products]
+    # Exact/strong first, then same-family related (ice cream / dairy for Häagen-Dazs, etc.).
+    display_products: list[Product] = []
+    seen_ids: set[int] = set()
+    for p in strong_products + related_products:
+        if p.id in seen_ids:
+            continue
+        seen_ids.add(p.id)
+        display_products.append(p)
+    if not display_products:
+        display_products = products
+
+    product_cards = [product_card(product, compute_signal(db, product)) for product in display_products[:24]]
     # Only promote strong semantic hits into the product list.
     seen = {card["id"] for card in product_cards}
     for item in semantic_products.values():
         if item["score"] >= 0.72 and item["product"]["id"] not in seen:
             product_cards.append(item["product"])
 
-    if discovery and discovery.get("ingested"):
-        reports = (
-            db.query(Report)
-            .options(joinedload(Report.product), joinedload(Report.issue_links).joinedload(ReportIssue.issue))
-            .filter(or_(Report.text.ilike(like), Report.title.ilike(like)))
-            .order_by(Report.created_at.desc())
-            .limit(20)
-            .all()
+    related_note = None
+    if related_kws and related_products and not strong_products:
+        related_note = (
+            f"No exact match for “{q}” — showing related {', '.join(related_kws[:4])} items."
         )
+    elif related_kws and related_products and strong_products:
+        related_note = f"Also showing related {', '.join(related_kws[:3])} items."
+
+    discovery_payload = None
+    if discovery:
+        discovery_payload = {
+            "provider": discovery.get("provider"),
+            "ingested": discovery.get("ingested", 0),
+            "message": discovery.get("message") or related_note,
+            "skipped": discovery.get("skipped"),
+        }
+    elif related_note:
+        discovery_payload = {
+            "provider": None,
+            "ingested": 0,
+            "message": related_note,
+            "skipped": None,
+        }
 
     return {
         "query": q,
@@ -217,14 +372,7 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
             for report in reports
         ],
         "semantic": sorted(semantic_products.values(), key=lambda item: item["score"], reverse=True),
-        "discovery": {
-            "provider": discovery.get("provider") if discovery else None,
-            "ingested": discovery.get("ingested", 0) if discovery else 0,
-            "message": discovery.get("message") if discovery else None,
-            "skipped": discovery.get("skipped") if discovery else None,
-        }
-        if discovery
-        else None,
+        "discovery": discovery_payload,
     }
 
 
@@ -240,29 +388,59 @@ def discover_from_query(db: Session, query: str) -> dict:
 
     settings = get_settings()
     foodish = _query_looks_like_food(query)
-    product = _resolve_product(
-        db,
-        {
-            "product_name": query.title() if len(query) < 80 else query[:80].title(),
-            "brand": "Search",
-            "category": "Food" if foodish else "Physical",
-            "summary": f"Created from search for “{query}”.",
-        },
+
+    from .pipeline.product_identity import normalize_product_identity
+
+    identity = normalize_product_identity(query, context="user search")
+    brand = identity.get("brand") if identity.get("brand") not in {None, "", "Unknown"} else "Search"
+    name = identity.get("name") or (query.title() if len(query) < 80 else query[:80].title())
+    category = "Food" if foodish or (identity.get("category") or "").lower() == "food" else (
+        identity.get("category") or "Physical"
     )
-    product.summary = product.summary or f"Created from search for “{query}”."
-    if foodish:
-        product.category = "Food"
+    if category == "Uncategorized":
+        category = "Food" if foodish else "Physical"
+
+    # Dedicated catalog slug for this query — don't fuzzy-merge into unrelated CAERS/official SKUs.
+    slug_base = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")[:56] or "query"
+    slug = f"search-{slug_base}"
+    product = db.query(Product).filter(Product.slug == slug).first()
+    if not product:
+        product = Product(
+            slug=slug,
+            brand=str(brand)[:120],
+            name=str(name)[:180],
+            category=category,
+            summary=(
+                f"Added from search for “{query}”. "
+                "Pulling iWasPoisoned / Reddit / open-web reports…"
+            )[:500],
+        )
+        db.add(product)
+        db.flush()
+    else:
+        product.brand = str(brand)[:120]
+        product.name = str(name)[:180]
+        if foodish:
+            product.category = "Food"
     db.commit()
 
     result = run_discovery(
         db,
         product.slug,
         extra=query,
-        max_pages=settings.search_scrape_pages,
-        max_queries=3,
+        max_pages=min(settings.search_scrape_pages, 5),
+        max_queries=4,
         force=True,
     )
+    # Reload so signal includes freshly ingested reports.
+    db.refresh(product)
     result["product"] = product_card(product, compute_signal(db, product))
+    if not result.get("message"):
+        ingested = result.get("ingested") or 0
+        result["message"] = (
+            f"Added “{product.name}” to the catalog"
+            + (f" and ingested {ingested} public page{'s' if ingested != 1 else ''}." if ingested else ".")
+        )
     return result
 
 
@@ -790,36 +968,132 @@ def _source_label(url: str) -> str:
 
 
 def _resolve_product(db: Session, payload: dict) -> Product:
+    from .pipeline.product_identity import normalize_product_identity
+
+    context = sanitize_text(payload.get("text") or "", 800)
     if payload.get("product_slug"):
         product = get_product(db, payload["product_slug"])
         if product:
+            if _product_needs_polish(product):
+                identity = normalize_product_identity(
+                    product.name,
+                    brand=product.brand if (product.brand or "").lower() not in {"unknown", "search"} else None,
+                    context=context,
+                )
+                _polish_product_identity(product, identity)
             return product
     name = sanitize_text(payload.get("product_name") or "", 200)
     brand = sanitize_text(payload.get("brand") or "", 120)
     if not name:
         raise ValueError("A product is required")
-    slug = _slugify(f"{brand} {name}")
+
+    identity = normalize_product_identity(
+        name,
+        brand=brand or None,
+        context=context,
+    )
+    matched = _find_matching_product(db, identity, raw_name=name)
+    if matched:
+        _polish_product_identity(matched, identity)
+        return matched
+
+    slug = _slugify(f"{identity['brand']} {identity['name']}")
+    # Avoid colliding with an existing slug from a different naming path.
     existing = get_product(db, slug)
     if existing:
+        _polish_product_identity(existing, identity)
         return existing
-    named = db.query(Product).filter(Product.name.ilike(name))
-    if brand:
-        named = named.filter(Product.brand.ilike(brand))
-    existing_named = named.first()
-    if existing_named:
-        return existing_named
+
     product = Product(
-        slug=slug,
-        brand=brand or "Unknown",
-        name=name,
+        slug=slug[:160],
+        brand=identity["brand"] or "Unknown",
+        name=identity["name"],
         model=sanitize_text(payload.get("model") or "", 80) or None,
-        category=sanitize_text(payload.get("category") or "Uncategorized", 80),
+        category=sanitize_text(payload.get("category") or identity.get("category") or "Uncategorized", 80),
         upc=sanitize_text(payload.get("upc") or "", 32) or None,
-        summary=sanitize_text(payload.get("summary") or "Created from a community report.", 500),
+        summary=sanitize_text(
+            payload.get("summary") or f"Community reports about {identity['brand']} {identity['name']}.",
+            500,
+        ),
     )
     db.add(product)
     db.flush()
     return product
+
+
+def _product_needs_polish(product: Product) -> bool:
+    brand = (product.brand or "").strip().lower()
+    name = product.name or ""
+    return brand in {"", "unknown", "search"} or name == name.lower() or name == name.upper()
+
+
+def _find_matching_product(db: Session, identity: dict, *, raw_name: str) -> Product | None:
+    """Prefer an existing catalog row over creating a near-duplicate."""
+    brand = (identity.get("brand") or "").strip()
+    name = (identity.get("name") or "").strip()
+    aliases = [a for a in (identity.get("aliases") or []) if a]
+    needles = {raw_name.lower(), name.lower()}
+    needles.update(a.lower() for a in aliases)
+    if brand and brand.lower() != "unknown":
+        needles.add(f"{brand} {name}".lower())
+        needles.add(brand.lower())
+
+    # Exact name (case-insensitive), optionally with brand.
+    named = db.query(Product).filter(Product.name.ilike(name))
+    if brand and brand.lower() != "unknown":
+        branded = named.filter(Product.brand.ilike(brand)).first()
+        if branded:
+            return branded
+    exact = named.first()
+    if exact:
+        return exact
+
+    # Raw typed name exact.
+    raw_hit = db.query(Product).filter(Product.name.ilike(raw_name)).first()
+    if raw_hit:
+        return raw_hit
+
+    # Containment / alias match against a bounded catalog scan.
+    products = db.query(Product).order_by(Product.id.desc()).limit(400).all()
+    compact_needles = [n for n in needles if len(n) >= 4]
+
+    best: Product | None = None
+    best_score = 0
+    for product in products:
+        blob = f"{product.brand} {product.name}".lower()
+        score = 0
+        for needle in compact_needles:
+            if needle == product.name.lower() or needle == f"{product.brand} {product.name}".lower():
+                score = max(score, 100)
+            elif needle in blob or product.name.lower() in needle:
+                score = max(score, 40 + min(len(needle), 20))
+        if score > best_score:
+            best_score = score
+            best = product
+    if best and best_score >= 40:
+        return best
+    return None
+
+
+def _polish_product_identity(product: Product, identity: dict) -> None:
+    """Upgrade placeholder catalog rows (Unknown / all-lowercase) to normalized identity."""
+    brand = (identity.get("brand") or "").strip()
+    name = (identity.get("name") or "").strip()
+    category = (identity.get("category") or "").strip()
+    if not name:
+        return
+    dirty_brand = (product.brand or "").strip().lower() in {"", "unknown", "search"}
+    dirty_name = product.name == product.name.lower() or product.name == product.name.upper()
+    if dirty_brand and brand and brand.lower() != "unknown":
+        product.brand = brand
+    if dirty_name:
+        product.name = name
+    if category and (not product.category or product.category == "Uncategorized"):
+        product.category = category
+    if dirty_brand or dirty_name:
+        # Keep slug stable if already referenced; only refresh summary when placeholder-ish.
+        if not product.summary or "community report" in (product.summary or "").lower():
+            product.summary = f"Community reports about {product.brand} {product.name}."[:500]
 
 
 def _apply_issues(db: Session, report: Report, extracted: dict) -> None:

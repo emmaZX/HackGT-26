@@ -18,20 +18,34 @@ def product_card(product: Product, signal: dict, local: bool = False) -> dict:
         "signal": signal,
         "local": local,
         "tags": tags,
+        "source_tier": signal.get("source_tier") or "unofficial",
     }
 
 
 def product_detail(product: Product, signal: dict, reports: list[Report], posts: list[Post]) -> dict:
+    tier = signal.get("source_tier") or "unofficial"
+    if tier == "caers":
+        disclaimer = (
+            "CAERS entries are FDA-hosted adverse event reports — not an official recall. "
+            "Reports are largely voluntary and unverified; they do not prove the product caused harm."
+        )
+    elif tier == "official":
+        disclaimer = (
+            "Official notices come from Ongoing FDA/FSIS recalls or active FDA outbreak investigations. "
+            "Outbreak watches are not the same as a product recall unless a recall was initiated."
+        )
+    else:
+        disclaimer = (
+            "Community signals are not proof that a product is unsafe. "
+            "They identify patterns worth investigating — often before an official recall exists. "
+            "No official recall does not mean a product is safe."
+        )
     return {
         **product_card(product, signal, local=False),
         "official_status": _official_status(signal),
         "reports": [report_card(report) for report in reports],
         "posts": [post_card(post) for post in posts],
-        "disclaimer": (
-            "Community signals are not proof that a product is unsafe. "
-            "They identify patterns worth investigating — often before an official recall exists. "
-            "No official recall does not mean a product is safe."
-        ),
+        "disclaimer": disclaimer,
     }
 
 
@@ -93,9 +107,9 @@ def _official_status(signal: dict) -> dict:
                 "state": "no_official_recall",
                 "headline": "No official recall found yet",
                 "detail": (
-                    "No Ongoing FDA/CPSC recall is attached right now. "
-                    "That does not mean the product is safe — "
-                    "and it does not mean early internet clusters are proof of harm."
+                "No Ongoing FDA/FSIS recall is attached right now. "
+                "That does not mean the product is safe — "
+                "and it does not mean early internet clusters are proof of harm."
                 ),
                 "recall": None,
             }
@@ -120,7 +134,7 @@ def _official_status(signal: dict) -> dict:
         "state": "no_official_recall",
         "headline": "No official recall found yet",
         "detail": (
-            "No FDA/CPSC recall is attached right now. That does not mean the product is safe — "
+            "No FDA/FSIS/CPSC recall is attached right now. That does not mean the product is safe — "
             "and it does not mean early internet clusters are proof of harm."
         ),
         "recall": None,
@@ -136,9 +150,14 @@ def _tags(signal: dict, local: bool) -> list[str]:
         "elevated_reports": "ELEVATED REPORTS",
         "limited_reports": "LIMITED REPORTS",
     }
+    tier = signal.get("source_tier") or "unofficial"
+    if signal.get("outbreak"):
+        tags.append("OUTBREAK WATCH")
+    if signal.get("spike") and signal["spike"].get("is_spike"):
+        tags.append("CAERS SPIKE")
     if signal.get("internet_before_official"):
         tags.append("INTERNET FIRST")
-    if key in mapping:
+    if key in mapping and tier == "unofficial":
         tags.append(mapping[key])
     if signal.get("official_recall"):
         agency = (signal["official_recall"].get("agency") or "").upper()
@@ -149,10 +168,15 @@ def _tags(signal: dict, local: bool) -> list[str]:
             tags.append("FDA RECALL")
         elif agency == "CPSC":
             tags.append("CPSC RECALL")
+        elif "FSIS" in agency or agency.startswith("USDA"):
+            tags.append("OFFICIAL RECALL")
+            tags.append("USDA-FSIS")
         else:
             tags.append("OFFICIAL RECALL")
-        if agency and agency not in {"FDA", "CPSC"} and agency not in tags:
-            tags.append(agency)
+            if agency and agency not in tags:
+                tags.append(agency)
+    if tier == "unofficial" and "UNOFFICIAL" not in tags and not signal.get("official_recall"):
+        tags.append("UNOFFICIAL")
     if local:
         tags.append("LOCAL")
     if signal.get("velocity_percent") and signal["velocity_percent"] >= 80:

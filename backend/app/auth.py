@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from functools import lru_cache
+import logging
 
 import jwt
 from fastapi import Depends, HTTPException
@@ -9,6 +10,7 @@ from jwt import PyJWKClient
 from .config import get_settings
 from .security import sanitize_display_name
 
+logger = logging.getLogger(__name__)
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -44,14 +46,34 @@ def verify_cognito_token(token: str) -> AuthUser:
             leeway=60,
         )
     except jwt.PyJWTError as exc:
+        # Decode without verify only to log mismatch hints (never return these to the client).
+        try:
+            unchecked = jwt.decode(
+                token,
+                options={"verify_signature": False, "verify_aud": False, "verify_exp": False},
+                algorithms=["RS256"],
+            )
+            logger.warning(
+                "Cognito JWT rejected (%s): token_use=%s aud=%s iss=%s expected_aud=%s expected_iss=%s",
+                type(exc).__name__,
+                unchecked.get("token_use"),
+                unchecked.get("aud") or unchecked.get("client_id"),
+                unchecked.get("iss"),
+                settings.cognito_app_client_id,
+                settings.cognito_issuer,
+            )
+        except Exception:
+            logger.warning("Cognito JWT rejected (%s) — token was not decodable", type(exc).__name__)
         raise HTTPException(401, "Sign in again — that session is not valid.") from exc
 
     if claims.get("token_use") not in {None, "id"}:
+        logger.warning("Cognito JWT rejected: token_use=%s (need id token)", claims.get("token_use"))
         raise HTTPException(401, "Sign in again — that session is not valid.")
     sub = claims.get("sub")
     if not sub:
         raise HTTPException(401, "Sign in again — that session is not valid.")
     return AuthUser(sub=sub, email=claims.get("email"), display_name=_display_name(claims))
+
 
 
 def require_user(

@@ -25,13 +25,13 @@ def niche_queries(
         product_name, extra
     )
     if is_food:
-        # Unofficial complaint sources first — never lead with "recall" (pulls regulator press).
+        # Unofficial: iWasPoisoned + grocery/illness first; Reddit is supplementary.
         base = [
-            f'{product_name} site:reddit.com (sick OR vomiting OR diarrhea OR "food poisoning" OR nauseous)',
             f'site:iwaspoisoned.com {product_name}',
-            f'{product_name} (site:reddit.com OR site:iwaspoisoned.com OR site:facebook.com) (sick OR illness)',
-            f'"{product_name}" (reddit OR "i was poisoned" OR nextdoor OR discord) (vomiting OR diarrhea OR "got sick")',
-            f'"{product_name}" ("threw up" OR "food poisoning" OR "whole family") -site:fda.gov -site:cdc.gov -recall',
+            f'site:iwaspoisoned.com {product_name} (grocery OR restaurant OR brand OR sick)',
+            f'{product_name} site:iwaspoisoned.com (vomiting OR diarrhea OR "food poisoning")',
+            f'{product_name} ("food poisoning" OR "got sick" OR vomiting) (grocery OR Costco OR Walmart) -site:fda.gov -site:cdc.gov',
+            f'{product_name} site:reddit.com (sick OR vomiting OR diarrhea OR "food poisoning" OR nauseous)',
         ]
     else:
         # Physical / appliance queries — only used when a specific non-food product is searched.

@@ -26,7 +26,9 @@ export function isAuthConfigured() {
 }
 
 export function configureAuth() {
-  if (configured || !isAuthConfigured() || typeof window === "undefined") return isAuthConfigured();
+  if (!isAuthConfigured() || typeof window === "undefined") return false;
+  // Always re-apply env-based pool/client so .env.local fixes take effect after restart
+  // without a hard full reload of the JS module state mid-session.
   Amplify.configure({
     Auth: {
       Cognito: {
@@ -51,7 +53,10 @@ export function isUnconfirmedError(err: unknown) {
 export async function getIdToken() {
   if (!configureAuth()) return null;
   try {
-    const session = await fetchAuthSession();
+    let session = await fetchAuthSession();
+    if (!session.tokens?.idToken) {
+      session = await fetchAuthSession({ forceRefresh: true });
+    }
     return session.tokens?.idToken?.toString() ?? null;
   } catch {
     return null;

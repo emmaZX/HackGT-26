@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { Feed } from "@/lib/types";
+import { Feed, ProductCard } from "@/lib/types";
 import { getCity } from "@/lib/identity";
 import { LocationPrompt } from "@/components/LocationPrompt";
 import { RecentCarousel } from "@/components/RecentCarousel";
@@ -40,13 +40,24 @@ export default function HomePage() {
     setCity(next);
   }, []);
 
+  const official = feed?.official?.length ? feed.official : (feed?.important || []).filter((c) => c.source_tier === "official" || c.signal.source_tier === "official");
+  const caers = feed?.caers_spikes?.length
+    ? feed.caers_spikes
+    : (feed?.important || []).filter((c) => c.source_tier === "caers" || c.signal.source_tier === "caers");
+  const unofficial = feed?.unofficial?.length
+    ? feed.unofficial
+    : (feed?.important || []).filter((c) => (c.source_tier || c.signal.source_tier || "unofficial") === "unofficial");
+
   const nearbyGeo = feed?.nearby.flatMap((card) => card.signal.geography) || [];
   const rising = feed?.trending.filter((p) => (p.signal.velocity_percent || 0) > 0) || [];
-  const mayUse = feed ? (rising.length ? rising : feed.important).slice(0, 4) : null;
+  const mayUse = feed
+    ? (rising.length ? rising : [...official, ...caers, ...unofficial]).slice(0, 4)
+    : null;
   const latest = (feed?.recent_reports || [])
     .filter((r) => isInternetReport(r) || isUsableSourceUrl(r.source_url))
     .slice(0, 8);
   const showSkeletons = loading && !feed;
+  const heroCards = [...unofficial, ...official, ...caers].slice(0, 16);
 
   return (
     <div>
@@ -60,8 +71,8 @@ export default function HomePage() {
 
       <section aria-labelledby="recent-title" aria-busy={showSkeletons}>
         <h2 id="recent-title" className="section-title">recent updates</h2>
-        {feed?.important.length ? (
-          <RecentCarousel products={feed.important} />
+        {heroCards.length ? (
+          <RecentCarousel products={heroCards} />
         ) : showSkeletons ? (
           <div className="flex gap-[30px] overflow-hidden pb-[18px] pt-[15px]">
             {Array.from({ length: 5 }, (_, i) => (
@@ -69,9 +80,38 @@ export default function HomePage() {
             ))}
           </div>
         ) : (
-          <p className="mb-6 mt-4 text-sm text-[#627290]">No updates yet. Post the first one with the + button.</p>
+          <p className="mb-6 mt-4 text-sm text-[#627290]">No updates yet. Community reports and recent official items fill this section.</p>
         )}
       </section>
+
+      <TierSection
+        id="unofficial"
+        title="community / open web"
+        blurb="Neighbor posts, iWasPoisoned, and Reddit-style conjecture — the early signal, not a verdict."
+        products={unofficial}
+        loading={showSkeletons}
+        empty="No community reports yet. Post with + or search a food brand."
+        disclaimer="Unofficial chatter is a heads-up, not proof of harm."
+      />
+
+      <TierSection
+        id="official"
+        title="urgent official items"
+        blurb="Newest Ongoing FDA/USDA-FSIS recalls and active outbreak watches only — resolved or stale notices are removed."
+        products={official}
+        loading={showSkeletons}
+        empty="No recent Ongoing official items right now."
+      />
+
+      <TierSection
+        id="caers"
+        title="complaint reports (CAERS)"
+        blurb="Foods with FDA-hosted adverse event reports. Not a recall — unverified; report ≠ causation."
+        products={caers}
+        loading={showSkeletons}
+        empty="No CAERS items loaded yet."
+        disclaimer="CAERS reports are largely voluntary and do not prove a product caused harm."
+      />
 
       <div className="mt-4 grid gap-10 lg:grid-cols-[710px_1fr] lg:gap-[53px]">
         <section aria-labelledby="area-title">
@@ -102,8 +142,48 @@ export default function HomePage() {
               linkLabel="Open original"
             />
           </div>
+          {feed.disclaimer && (
+            <p className="mt-6 max-w-[70ch] text-[13px] leading-relaxed text-[#627290]">{feed.disclaimer}</p>
+          )}
         </section>
       )}
     </div>
+  );
+}
+
+function TierSection({
+  id,
+  title,
+  blurb,
+  products,
+  loading,
+  empty,
+  disclaimer,
+}: {
+  id: string;
+  title: string;
+  blurb: string;
+  products: ProductCard[];
+  loading: boolean;
+  empty: string;
+  disclaimer?: string;
+}) {
+  return (
+    <section aria-labelledby={`${id}-title`} className="mt-12">
+      <h2 id={`${id}-title`} className="section-title">{title}</h2>
+      <p className="mt-2 max-w-[70ch] text-[14px] leading-relaxed text-[#627290]">{blurb}</p>
+      <div className="mt-5 grid gap-[14px]">
+        {products.length
+          ? products.slice(0, 24).map((product) => <ProductRow key={`${id}-${product.slug}`} product={product} />)
+          : loading
+            ? Array.from({ length: 2 }, (_, i) => <div key={i} className="skeleton h-[86px]" />)
+            : (
+              <p className="text-sm text-[#627290]">{empty}</p>
+            )}
+      </div>
+      {disclaimer && (
+        <p className="mt-3 max-w-[70ch] text-[12px] leading-relaxed text-[#8a94a8]">{disclaimer}</p>
+      )}
+    </section>
   );
 }
