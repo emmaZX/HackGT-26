@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from .x_sweep_job import router as x_sweep_router
+from .categories import router as categories_router
+
 from .bootstrap import bootstrap_catalog, start_home_scrape_background
 from .cpsc_sync import start_cpsc_sync_background
 from .image_lookup import start_image_lookup_background
@@ -48,6 +51,8 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+app.include_router(x_sweep_router)
+app.include_router(categories_router)
 
 class ReportIn(BaseModel):
     product_slug: str | None = None

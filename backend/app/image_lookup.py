@@ -13,14 +13,22 @@ first). One image per product is saved in Product.image_url; nothing is searched
 Photo credit rides in the URL fragment (…/photo.jpg#credit=…). Browsers ignore fragments when
 loading images, and it avoids a schema change while the backend is being reworked.
 
+Products with no match are remembered in data/image_lookup_checked.json, so each product is
+searched once, ever. Delete that file to retry everything.
+
 Env:
-  IMAGE_LOOKUP_LIMIT  max products to look up per startup (default 30, 0 disables)
+  IMAGE_LOOKUP_LIMIT  max products to look up per run (default 500, 0 disables)
+
+Run it right away instead of waiting for a restart:
+  .venv\\Scripts\\python run_image_lookup.py
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -45,8 +53,23 @@ FOOD_WORDS = re.compile(
 )
 
 
+CHECKED_FILE = Path(__file__).resolve().parents[1] / "data" / "image_lookup_checked.json"
+
+
 class RateLimited(Exception):
     pass
+
+
+def _load_checked() -> set[str]:
+    try:
+        return set(json.loads(CHECKED_FILE.read_text()))
+    except Exception:
+        return set()
+
+
+def _save_checked(slugs: set[str]) -> None:
+    CHECKED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHECKED_FILE.write_text(json.dumps(sorted(slugs)))
 
 
 def _terms(product: Product) -> tuple[str, str]:
@@ -103,15 +126,24 @@ def openverse(query: str) -> str | None:
     return None
 
 
+# Set when Open Food Facts errors (e.g. 503 when overloaded); skipped for the rest of the run
+_off_unavailable = False
+
+
 def find_image(product: Product) -> str | None:
+    global _off_unavailable
     full, name_only = _terms(product)
     if len(name_only) < 4:
         return None
-    if _is_food(product):
-        found = open_food_facts(full)
-        time.sleep(6.5)  # Open Food Facts allows ~10 searches per minute
-        if found:
-            return found
+    if _is_food(product) and not _off_unavailable:
+        try:
+            found = open_food_facts(full)
+            time.sleep(6.5)  # Open Food Facts allows ~10 searches per minute
+            if found:
+                return found
+        except (RateLimited, httpx.HTTPError) as exc:
+            _off_unavailable = True
+            logger.warning("Open Food Facts unavailable (%s); using Openverse only for this run", str(exc)[:80])
     for query in dict.fromkeys([full, name_only]):  # branded first, then generic
         found = openverse(query)
         time.sleep(1.5)
@@ -120,29 +152,49 @@ def find_image(product: Product) -> str | None:
     return None
 
 
+def run_image_lookup(limit: int | None = None) -> dict:
+    """Look up images for every product that has none and hasn't been checked before."""
+    global _off_unavailable
+    _off_unavailable = False
+    limit = limit if limit is not None else int(os.getenv("IMAGE_LOOKUP_LIMIT", "500") or 0)
+    checked = _load_checked()
+    found = missed = 0
+    stopped = False
+    with SessionLocal() as db:
+        products = [
+            p for p in db.query(Product).filter(Product.image_url.is_(None)).all() if p.slug not in checked
+        ][:limit]
+        for product in products:
+            try:
+                image = find_image(product)
+            except RateLimited as exc:
+                logger.warning("Image lookup rate-limited by %s; the rest will be tried next run", exc)
+                stopped = True
+                break
+            except Exception as exc:
+                logger.warning("Image lookup failed for %s: %s", product.slug, str(exc)[:120])
+                continue  # network hiccup: not marked checked, so it's retried next run
+            if image:
+                product.image_url = image
+                db.commit()
+                found += 1
+            elif _off_unavailable and _is_food(product):
+                missed += 1  # Open Food Facts was down: retry this one next run
+            else:
+                checked.add(product.slug)  # no match: don't search this product again
+                _save_checked(checked)
+                missed += 1
+    result = {"looked_up": found + missed, "found": found, "no_match": missed, "rate_limited": stopped}
+    logger.warning("Image lookup done: %s", result)
+    return result
+
+
 def start_image_lookup_background() -> None:
-    limit = int(os.getenv("IMAGE_LOOKUP_LIMIT", "30") or 0)
-    if limit <= 0:
+    if int(os.getenv("IMAGE_LOOKUP_LIMIT", "500") or 0) <= 0:
         return
 
     def worker() -> None:
         time.sleep(20)  # after the CPSC sync, which fills official photos first
-        found = 0
-        with SessionLocal() as db:
-            products = db.query(Product).filter(Product.image_url.is_(None)).limit(limit).all()
-            for product in products:
-                try:
-                    image = find_image(product)
-                    if image:
-                        product.image_url = image
-                        db.commit()
-                        found += 1
-                except RateLimited as exc:
-                    logger.warning("Image lookup rate-limited by %s; stopping until next restart", exc)
-                    break
-                except Exception:
-                    logger.exception("Image lookup failed for %s", product.slug)
-                    db.rollback()
-        logger.warning("Image lookup done: %s of %s products got an image", found, len(products))
+        run_image_lookup()
 
     threading.Thread(target=worker, name="image-lookup", daemon=True).start()

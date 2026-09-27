@@ -14,6 +14,7 @@ import { Disclaimer } from "@/components/Disclaimer";
 import { POSTED_EVENT } from "@/components/PostModal";
 import { BackArrow } from "@/components/BackArrow";
 import { ProductImage } from "@/components/ProductImage";
+import { CategoryPanel } from "@/components/CategoryPanel";
 
 function ProductInner() {
   const router = useRouter();
@@ -320,6 +321,8 @@ function ProductInner() {
           <GeoMap geography={signal.geography} className="mt-[13px] h-[320px] md:h-[380px]" />
         </section>
       )}
+
+      <CategoryPanel category={product.category} slug={product.slug} />
 
       <section className="mt-12">
         <h2 className="section-title">community</h2>
