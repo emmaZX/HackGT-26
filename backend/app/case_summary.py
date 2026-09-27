@@ -8,7 +8,7 @@ GET /api/products/{slug}/summary
 - Generated once per product and cached (memory + data/case_summaries.json). It regenerates
   only when the product's set of reports changes, so page views don't cost credit.
 - Cited IDs are checked against the reports actually sent; invented IDs are dropped.
-- Needs at least 2 reports; with fewer there's nothing to relate.
+- Needs at least 1 report with text.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from fastapi import APIRouter
 from .database import SessionLocal
 from .grok import DEFAULT_TEXT_MODEL, grok_available, output_text, respond
 from .models import Product, Report
+from .venue_check import _post_start
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,7 +38,7 @@ PROMPT = """You write a short case summary for a food safety app. Below are publ
 
 Write 2-3 plain sentences for a worried shopper:
 - what people describe (symptoms, what they found, timing), and
-- why these reports look related, or say plainly if they don't.
+- if there is more than one report, why they look related, or say plainly if they don't.
 Cite the reports you rely on with their IDs in square brackets, like [12] or [12, 15].
 Rules: only use what the reports say. Do not say the product caused anything. Do not diagnose.
 Do not mention recalls unless a report does. Do not invent details.
@@ -75,7 +76,7 @@ def generate(product: Product, reports: list[Report]) -> dict | None:
     lines = []
     for r in reports[:MAX_REPORTS]:
         when = (r.incident_date or r.created_at)
-        text = re.sub(r"\s+", " ", (r.excerpt or r.text or ""))[:400]
+        text = _post_start(r)
         lines.append(f"[{r.id}] ({r.source}{', ' + when.strftime('%Y-%m-%d') if when else ''}) {text}")
     label = product.name if not product.brand or product.brand == "Unknown" else f"{product.brand} {product.name}"
     response = respond(
@@ -119,7 +120,7 @@ def product_summary(slug: str):
             .all()
         )
         reports = [r for r in reports if (r.text or r.excerpt)]
-        if len(reports) < 2 or not grok_available():
+        if not reports or not grok_available():
             return {"summary": None}
         sig = _signature(reports)
         cached = _cache.get(slug)

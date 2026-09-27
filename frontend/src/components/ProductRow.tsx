@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { ProductCard as Product } from "@/lib/types";
 import { StatusBadge, isRecallTag, splitTags } from "./Tag";
+import { GrokBadge, isGrokSummary } from "./GrokBadge";
 
 /** "products you may use" row from the home frame (537 × 86 in Figma) */
 export function ProductRow({ product }: { product: Product }) {
   const { status } = splitTags(product.tags);
   const blurb = product.summary || product.signal.explanation;
+  const byGrok = isGrokSummary(product.summary, product.source_tier || product.signal.source_tier);
 
   return (
     <Link
@@ -22,7 +24,12 @@ export function ProductRow({ product }: { product: Product }) {
           </div>
         )}
       </div>
-      <p className="line-clamp-2 mt-[9px] font-mulish text-[10px] font-light leading-[13px] tracking-[-0.04em] text-[#627290]">
+      {byGrok && (
+        <div className="mt-[7px]">
+          <GrokBadge size="sm" />
+        </div>
+      )}
+      <p className={`line-clamp-2 font-mulish text-[10px] font-light leading-[13px] tracking-[-0.04em] text-[#627290] ${byGrok ? "mt-[4px]" : "mt-[9px]"}`}>
         {blurb}
       </p>
     </Link>

@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { ReportCard } from "@/lib/types";
 import { isUsableSourceUrl } from "./EvidenceList";
+import { GrokBadge } from "./GrokBadge";
 
 type Summary = { summary: string | null; cited_ids?: number[]; report_count?: number };
 
@@ -10,7 +11,7 @@ const API = process.env.NEXT_PUBLIC_API_URL || "";
 
 /**
  * Grok-written summary of what people describe, with [id] citations turned into links to the
- * cited reports. Hidden when there are fewer than 2 reports or Grok isn't configured.
+ * cited reports. Hidden when there are no reports or Grok isn't configured.
  */
 export function CaseSummary({ slug, reports }: { slug: string; reports: ReportCard[] }) {
   const [data, setData] = useState<Summary | null>(null);
@@ -41,7 +42,10 @@ export function CaseSummary({ slug, reports }: { slug: string; reports: ReportCa
   const parts = data.summary.split(/(\[[\d,\s]+\])/g);
   return (
     <section className="mt-10">
-      <h2 className="section-title">What people are describing</h2>
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="section-title">What people are describing</h2>
+        <GrokBadge />
+      </div>
       <p className="mt-4 max-w-[65ch] text-[16px] leading-relaxed text-[#031d4e]">
         {parts.map((part, i) => {
           const ids = part.match(/^\[([\d,\s]+)\]$/)?.[1].split(",").map((x) => Number(x.trim()));
@@ -70,7 +74,8 @@ export function CaseSummary({ slug, reports }: { slug: string; reports: ReportCa
         })}
       </p>
       <p className="mt-2 text-[12px] text-[#627290]">
-        Summarized by Grok from {data.report_count} reports. It can be wrong: the numbers link to the reports it used.
+        Summarized by Grok from {data.report_count === 1 ? "1 report" : `${data.report_count} reports`}. It can be
+        wrong: the numbers link to the reports it used.
       </p>
     </section>
   );

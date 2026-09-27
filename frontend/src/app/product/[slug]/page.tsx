@@ -16,6 +16,7 @@ import { BackArrow } from "@/components/BackArrow";
 import { ProductImage } from "@/components/ProductImage";
 import { LeadTime } from "@/components/LeadTime";
 import { CaseSummary } from "@/components/CaseSummary";
+import { GrokBadge, isGrokSummary } from "@/components/GrokBadge";
 import { CategoryPanel } from "@/components/CategoryPanel";
 
 function ProductInner() {
@@ -310,7 +311,14 @@ function ProductInner() {
               <Fact label="Barcode" value={product.upc} />
             </dl>
             {product.summary && (
-              <p className="mt-5 text-[13px] leading-relaxed text-[#627290]">{product.summary}</p>
+              <div className="mt-5">
+                {isGrokSummary(product.summary, tier) && (
+                  <div className="mb-2">
+                    <GrokBadge size="sm" />
+                  </div>
+                )}
+                <p className="text-[13px] leading-relaxed text-[#627290]">{product.summary}</p>
+              </div>
             )}
             {sources.length > 0 && (
               <p className="mt-5 text-[13px] text-[#627290]">
