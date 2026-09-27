@@ -898,8 +898,8 @@ def run_discovery(
                 "observed_at": observed,
                 "triage_label": "first_person_complaint",
                 "confidence": float(triage.get("score") or 0.5),
-                "confidence_method": "gemini"
-                if (triage.get("method") or "").startswith("gemini")
+                "confidence_method": (triage.get("method") or "")
+                if (triage.get("method") or "") in {"gemini", "grok"}
                 else "heuristic",
                 "location_label": None,
             }

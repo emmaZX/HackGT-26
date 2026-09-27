@@ -6,6 +6,7 @@ import json
 import re
 
 from ..config import get_settings
+from ..grok import ai_text, grok_available
 from ..data_sources.web_search import niche_queries
 
 
@@ -89,7 +90,7 @@ def _llm_queries(
     recall_hint: dict | None,
 ) -> list[str]:
     settings = get_settings()
-    if not settings.gemini_api_key:
+    if not (settings.gemini_api_key or grok_available()):
         return []
     try:
         import httpx
@@ -117,18 +118,9 @@ def _llm_queries(
         f"Context: {json.dumps(context)[:1200]}"
     )
     try:
-        response = httpx.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-            headers={"x-goog-api-key": settings.gemini_api_key},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=25,
-        )
-        if response.status_code >= 400:
+        text = ai_text(prompt, timeout=25)
+        if not text:
             return []
-        text = ""
-        for candidate in response.json().get("candidates", []):
-            for part in candidate.get("content", {}).get("parts", []):
-                text += part.get("text") or ""
         match = re.search(r"\[[\s\S]*\]", text)
         if not match:
             return []

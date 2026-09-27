@@ -92,6 +92,8 @@ def search_web(queries: list[str], limit_per_query: int = 5) -> list[SearchHit]:
         providers.append(("exa", lambda: _exa_search(queries, settings, limit_per_query)))
     if settings.brave_search_api_key:
         providers.append(("brave", lambda: _brave_search(queries, settings, limit_per_query)))
+    if _grok_web_enabled():
+        providers.append(("grok", lambda: _grok_search(queries)))
     if settings.gemini_api_key:
         providers.append(("gemini", lambda: _gemini_search(queries, settings)))
     if settings.openai_api_key:
@@ -113,11 +115,52 @@ def available_provider() -> str | None:
         return "exa"
     if settings.brave_search_api_key:
         return "brave"
+    if _grok_web_enabled():
+        return "grok"
     if settings.gemini_api_key:
         return "gemini"
     if settings.openai_api_key:
         return "openai"
     return None
+
+
+def _grok_web_enabled() -> bool:
+    import os
+
+    from ..grok import grok_available
+
+    return grok_available() and os.getenv("XAI_WEB_SEARCH", "").strip() in {"1", "true", "yes"}
+
+
+def _grok_search(queries: list[str]) -> list[SearchHit]:
+    """Grok's server-side web_search tool. Only URLs the search actually returned are kept."""
+    from ..grok import cited_urls, output_text, respond
+
+    hits: list[SearchHit] = []
+    for query in queries:
+        prompt = (
+            "Search the web for recent public pages where people report problems matching this query. "
+            "Return ONLY a JSON list of {title, url, snippet}. Only include pages you actually found. "
+            f"Query: {query}"
+        )
+        response = respond(prompt, tools=[{"type": "web_search"}], timeout=90)
+        found = cited_urls(response)
+        for match in _json_objects(output_text(response)):
+            url = match.get("url") or ""
+            if url and url in found:
+                hits.append(
+                    SearchHit(
+                        title=match.get("title") or url,
+                        url=url,
+                        snippet=match.get("snippet") or "",
+                        provider="grok",
+                        query=query,
+                    )
+                )
+        if not any(h.query == query for h in hits):
+            for url in list(found)[:5]:  # fall back to the raw sources Grok searched
+                hits.append(SearchHit(title=url, url=url, snippet="", provider="grok", query=query))
+    return [hit for hit in hits if hit.url.startswith(("http://", "https://"))]
 
 def _openai_search(queries: list[str], settings) -> list[SearchHit]:
     from ..openai_http import openai_post

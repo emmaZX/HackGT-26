@@ -103,13 +103,13 @@ export function PostModal({ onClose }: { onClose: () => void }) {
           id="post-title"
           className="border-b border-[#c0d4ef] pb-1 pt-10 text-center font-raleway text-[24px] font-medium tracking-[-0.04em] text-[#031d4e] md:pt-[34px]"
         >
-          issue a post
+          Issue a post
         </h2>
 
         {ready && !user ? (
           <div className="mt-8 text-center">
             <p className="font-raleway text-[16px] tracking-[-0.04em] text-[#031d4e]">
-              {configured ? "sign in to share with the community" : "posting needs sign-in, which isn't set up on this server yet"}
+              {configured ? "Sign in to share with the community" : "Posting needs sign-in, which isn't set up on this server yet"}
             </p>
             <p className="mx-auto mt-2 max-w-[380px] text-[13px] leading-relaxed text-[#627290]">
               Accounts keep reports tied to real people, which is what makes a cluster of them meaningful.
@@ -121,14 +121,14 @@ export function PostModal({ onClose }: { onClose: () => void }) {
                   onClick={onClose}
                   className="grid h-[52px] w-[160px] place-items-center rounded-full bg-[#031d4e] font-raleway text-[16px] tracking-[-0.04em] text-white"
                 >
-                  sign in
+                  Sign in
                 </Link>
                 <Link
                   href="/signup"
                   onClick={onClose}
                   className="grid h-[52px] w-[160px] place-items-center rounded-full bg-[#f8f8ff] font-raleway text-[16px] tracking-[-0.04em] text-[#031d4e] hover:bg-[#ecf0fc]"
                 >
-                  sign up
+                  Sign up
                 </Link>
               </div>
             )}
@@ -136,7 +136,7 @@ export function PostModal({ onClose }: { onClose: () => void }) {
         ) : (
         <form onSubmit={submit} className="mt-8 grid gap-[12px]">
           <label className={labelClass}>
-            your name
+            Your name
             <input
               value={user?.displayName || name}
               readOnly
@@ -147,7 +147,7 @@ export function PostModal({ onClose }: { onClose: () => void }) {
           </label>
 
           <label className={labelClass}>
-            product name
+            Product name
             <input
               ref={firstField}
               value={productName}
@@ -165,7 +165,7 @@ export function PostModal({ onClose }: { onClose: () => void }) {
           </label>
 
           <label className={labelClass}>
-            tell us what happened
+            Tell us what happened
             <textarea
               value={story}
               onChange={(e) => setStory(e.target.value)}
@@ -181,13 +181,13 @@ export function PostModal({ onClose }: { onClose: () => void }) {
           </label>
 
           <label className={labelClass}>
-            location
+            Location
             <input
               value={location}
               onChange={(e) => setLocation(e.target.value)}
               list="post-cities"
               maxLength={80}
-              placeholder="city (optional)"
+              placeholder="City (optional)"
               className={inputClass}
             />
             <datalist id="post-cities">
@@ -204,7 +204,7 @@ export function PostModal({ onClose }: { onClose: () => void }) {
             disabled={!canSubmit || busy}
             className="mx-auto mt-5 h-[52px] w-[240px] rounded-full bg-[#f8f8ff] font-raleway text-[16px] font-normal tracking-[-0.04em] text-[#031d4e] transition-colors hover:bg-[#ecf0fc] disabled:cursor-not-allowed disabled:text-[#c0d4ef] disabled:hover:bg-[#f8f8ff]"
           >
-            {busy ? "sharing…" : "share with community"}
+            {busy ? "Sharing…" : "Share with community"}
           </button>
         </form>
         )}

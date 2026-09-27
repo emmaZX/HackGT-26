@@ -7,6 +7,12 @@ Env (backend/.env or the root .env):
                       check console.x.ai for current names.
   XAI_MAX_TOOL_CALLS  optional; caps searches per request (default 3). Each X search call is
                       billed, so this is the main cost control.
+  XAI_TEXT_MODEL      optional; model for plain text jobs (extraction, triage, summaries).
+                      Defaults to the cheaper grok-4.20-0309-non-reasoning.
+  XAI_PIPELINE        set to 0 to stop pipeline steps (triage, extraction, naming, summaries,
+                      queries) from calling Grok; X search is unaffected.
+  XAI_WEB_SEARCH      set to 1 to let web discovery use Grok's web_search tool (off by default,
+                      because searches can trigger it and each call costs credit).
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ load_dotenv(_BACKEND.parent / ".env")
 
 XAI_URL = "https://api.x.ai/v1/responses"
 DEFAULT_MODEL = "grok-4.7"
+DEFAULT_TEXT_MODEL = "grok-4.20-0309-non-reasoning"
 
 
 class GrokError(RuntimeError):
@@ -36,15 +43,15 @@ def api_key() -> str:
     return key
 
 
-def respond(prompt: str, tools: list[dict] | None = None, timeout: float = 180.0) -> dict:
+def respond(prompt: str, tools: list[dict] | None = None, timeout: float = 180.0, model: str | None = None) -> dict:
     """One Responses API call. Server-side tools (x_search, web_search) run on xAI's side."""
     payload: dict = {
-        "model": os.getenv("XAI_MODEL", DEFAULT_MODEL),
+        "model": model or os.getenv("XAI_MODEL", DEFAULT_MODEL),
         "input": [{"role": "user", "content": prompt}],
-        # Keep "[[1]](url)" markers out of the text so JSON answers stay parseable
-        "include": ["no_inline_citations"],
     }
     if tools:
+        # Keep "[[1]](url)" markers out of the text so JSON answers stay parseable
+        payload["include"] = ["no_inline_citations"]
         payload["tools"] = tools
         payload["max_tool_calls"] = int(os.getenv("XAI_MAX_TOOL_CALLS", "3") or 3)
     response = httpx.post(
@@ -83,3 +90,52 @@ def cited_urls(response: dict) -> set[str]:
                 if ann.get("url"):
                     urls.add(ann["url"])
     return urls
+
+
+# ---------------------------------------------------------------------------
+# Plain text jobs for the pipeline (extraction, triage, naming, summaries, queries)
+# ---------------------------------------------------------------------------
+
+
+def grok_available() -> bool:
+    """True when pipeline AI steps should use Grok. Set XAI_PIPELINE=0 to turn them off (saves credit)."""
+    return bool(os.getenv("XAI_API_KEY", "").strip()) and os.getenv("XAI_PIPELINE", "1").strip() != "0"
+
+
+def ai_method() -> str:
+    """Which engine ai_text() will use, recorded on results as their method."""
+    return "grok" if grok_available() else "gemini"
+
+
+def ai_text(prompt: str, timeout: float = 30.0) -> str | None:
+    """
+    Run a plain text prompt. Grok when XAI_API_KEY is set, otherwise Gemini if configured.
+    Returns None on any failure so callers fall back to their non-AI rules.
+    """
+    if grok_available():
+        try:
+            response = respond(prompt, timeout=timeout, model=os.getenv("XAI_TEXT_MODEL", DEFAULT_TEXT_MODEL))
+            return output_text(response) or None
+        except Exception:
+            return None
+    try:
+        from .config import get_settings
+
+        settings = get_settings()
+        if not settings.gemini_api_key:
+            return None
+        response = httpx.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
+            headers={"x-goog-api-key": settings.gemini_api_key},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            return None
+        text = ""
+        for candidate in response.json().get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                text += part.get("text") or ""
+        return text or None
+    except Exception:
+        return None

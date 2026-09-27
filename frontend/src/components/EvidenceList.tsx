@@ -70,7 +70,7 @@ export function EvidenceList({
             </span>
             {report.created_at && <span>{timeAgo(report.created_at)}</span>}
             {report.location.label && <span>{report.location.label}</span>}
-            {report.is_duplicate && <span className="text-[#d9546a]">sounds like a reprint</span>}
+            {report.is_duplicate && <span className="text-[#d9546a]">Sounds like a reprint</span>}
           </div>
           {report.title && <p className="mt-2 text-[14px] font-semibold tracking-[-0.02em]">{report.title}</p>}
           <p className="mt-1 text-[14px] leading-relaxed text-[#31405e]">&ldquo;{report.excerpt}&rdquo;</p>

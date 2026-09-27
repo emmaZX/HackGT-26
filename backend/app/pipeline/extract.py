@@ -4,6 +4,7 @@ import json
 import re
 
 from ..config import get_settings
+from ..grok import ai_method, ai_text, grok_available
 from ..security import sanitize_text
 
 ISSUE_PATTERNS: list[tuple[str, str, list[str]]] = [
@@ -33,7 +34,7 @@ def extract_report(text: str, product_hint: str | None = None) -> dict:
     """
     cleaned = sanitize_text(text, 4000)
     settings = get_settings()
-    if settings.gemini_api_key:
+    if settings.gemini_api_key or grok_available():
         try:
             return _gemini_extract(cleaned, product_hint, settings.gemini_api_key, settings.gemini_model)
         except Exception:
@@ -69,17 +70,10 @@ def _gemini_extract(text: str, product_hint: str | None, api_key: str, model: st
         "severity (quote or 'as described by the reporter'), location, summary. "
         f"Known product hint: {product_hint or 'unknown'}\n\nREPORT:\n{text}"
     )
-    response = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"x-goog-api-key": api_key},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=30,
-    )
-    if response.status_code == 429:
-        raise RuntimeError("Gemini rate limited")
-    response.raise_for_status()
-    raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raw = ai_text(prompt, timeout=30)
+    if not raw:
+        raise RuntimeError("AI extraction unavailable")
     match = re.search(r"\{.*\}", raw, re.S)
     data = json.loads(match.group(0) if match else raw)
-    data["method"] = "gemini"
+    data["method"] = ai_method()
     return data

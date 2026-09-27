@@ -889,7 +889,7 @@ def _seed_community_from_web_locked(db: Session) -> dict:
                 "triage_label": "first_person_complaint",
                 "confidence": float(verdict.get("score") or 0.5),
                 "confidence_method": verdict.get("method")
-                if verdict.get("method") in {"heuristic", "gemini"}
+                if verdict.get("method") in {"heuristic", "gemini", "grok"}
                 else "heuristic",
                 "location_label": None,
             }

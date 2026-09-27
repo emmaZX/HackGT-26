@@ -6,9 +6,13 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session, joinedload
 
+from ..food_categories import FOOD_CATEGORIES
 from ..models import Product, Recall, Report, ReportIssue
 from .cluster import cluster_strength_from_reports
 from .spikes import score_caers_spike
+
+# "Food" is the older catch-all; the X sweep files products under the shared category list.
+FEED_CATEGORIES = ["Food", *FOOD_CATEGORIES]
 
 # ---------------------------------------------------------------------------
 # Signal methodology (MVP, intentionally replaceable)
@@ -381,7 +385,7 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
         clauses.insert(0, Product.id.in_(list(official_ids)))
     special = (
         db.query(Product)
-        .filter(Product.category == "Food", or_(*clauses))
+        .filter(Product.category.in_(FEED_CATEGORIES), or_(*clauses))
         .order_by(Product.id)
         .limit(200)
         .all()
@@ -389,8 +393,9 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
     special_ids = [p.id for p in special] or [-1]
     extras = (
         db.query(Product)
-        .filter(Product.category == "Food", ~Product.id.in_(special_ids))
-        .order_by(Product.id)
+        .filter(Product.category.in_(FEED_CATEGORIES), ~Product.id.in_(special_ids))
+        # Newest first, so recently found products (e.g. from the X sweep) aren't cut by the limit
+        .order_by(Product.id.desc())
         .limit(80)
         .all()
     )
@@ -423,9 +428,15 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
         for recall in all_recalls:
             recalls_by_product[recall.product_id].append(recall)
 
+    from ..venue_check import is_restaurant_report
+
     now = datetime.utcnow()
     for product in products:
-        reports = reports_by_product.get(product.id, [])
+        all_product_reports = reports_by_product.get(product.id, [])
+        # Grok labels each post restaurant or product; restaurant posts never reach the feed.
+        reports = [r for r in all_product_reports if not is_restaurant_report(r)]
+        if all_product_reports and not reports:
+            continue
         signal = compute_signal(
             db,
             product,

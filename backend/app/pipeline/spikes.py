@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..grok import ai_text, grok_available
 from ..models import Report
 
 
@@ -82,7 +83,7 @@ def summarize_caers_spike(product_label: str, sample_texts: list[str]) -> str:
         f"the recent baseline. This is not an official recall — reports are unverified "
         f"and do not prove the product caused harm."
     )
-    if not settings.gemini_api_key or not samples:
+    if not (settings.gemini_api_key or grok_available()) or not samples:
         return fallback[:500]
 
     try:
@@ -96,15 +97,7 @@ def summarize_caers_spike(product_label: str, sample_texts: list[str]) -> str:
             "Write 2 short sentences. Product: "
             f"{product_label}\n\nSample report excerpts:\n{joined}"
         )
-        response = httpx.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-            headers={"x-goog-api-key": settings.gemini_api_key},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30,
-        )
-        if response.status_code >= 400:
-            return fallback[:500]
-        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = (ai_text(prompt, timeout=30) or "").strip()
         return (raw or fallback)[:500]
     except Exception:
         return fallback[:500]

@@ -210,6 +210,10 @@ def run_x_sweep(focuses: list[str] | None = None, days: int = 30, limit: int = 2
     with SessionLocal() as db:
         result = save_posts(db, posts)
     result["posts_found"] = len(posts)
+    if result["added"]:
+        from .venue_check import run_venue_check
+
+        result["venue_check"] = run_venue_check()
     return result
 
 

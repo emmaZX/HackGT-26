@@ -63,7 +63,7 @@ export function Community({
             disabled={busy || body.trim().length < 4}
             className="btn-primary mt-3 px-4 py-2 text-sm disabled:opacity-40"
           >
-            {busy ? "sharing…" : "share with community"}
+            {busy ? "Sharing…" : "Share with community"}
           </button>
         </form>
       ) : (

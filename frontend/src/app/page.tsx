@@ -113,11 +113,12 @@ export default function HomePage() {
     : [...official, ...unofficial, ...caers]
   ).slice(0, 12);
   const showSkeletons = loading && !feed;
-  // Recent band: urgency order — official → community grocery → CAERS.
-  const heroCards = (feed?.priority_foods?.length
-    ? feed.priority_foods
-    : [...official, ...unofficial, ...caers]
-  ).slice(0, 16);
+  // Top band leads with what only this app shows: complaints with no official recall yet.
+  // Official recalls still lead the "Priority foods" list below.
+  const earlyCards = [...unofficial, ...caers].slice(0, 16);
+  const heroCards = earlyCards.length
+    ? earlyCards
+    : (feed?.priority_foods?.length ? feed.priority_foods : [...official, ...unofficial, ...caers]).slice(0, 16);
 
   return (
     <div>
@@ -130,7 +131,16 @@ export default function HomePage() {
       )}
 
       <section aria-labelledby="recent-title" aria-busy={showSkeletons}>
-        <h2 id="recent-title" className="section-title">Recent updates</h2>
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-1">
+          <h2 id="recent-title" className="section-title">
+            {earlyCards.length || !feed ? "Not recalled yet" : "Recent updates"}
+          </h2>
+          {(earlyCards.length > 0 || !feed) && (
+            <p className="pb-1 text-[13px] text-[#627290]">
+              Public complaints with no official recall. Early signals, not proof.
+            </p>
+          )}
+        </div>
         {/* Band sits exactly behind the scrolling window */}
         <div className="mt-4 overflow-hidden bg-[#9DBAD7] py-2">
           {heroCards.length ? (
@@ -153,7 +163,7 @@ export default function HomePage() {
         <>
         <TierSection
           id="unofficial"
-          title="community / open web"
+          title="Community / open web"
           blurb="Neighbor posts, iWasPoisoned, and Reddit-style conjecture — the early signal, not a verdict."
           products={unofficial}
           loading={showSkeletons}
@@ -163,7 +173,7 @@ export default function HomePage() {
 
         <TierSection
           id="official"
-          title="urgent official items"
+          title="Urgent official items"
           blurb="Newest Ongoing FDA/USDA-FSIS recalls and active outbreak watches only — resolved or stale notices are removed."
           products={official}
           loading={showSkeletons}
@@ -172,7 +182,7 @@ export default function HomePage() {
 
         <TierSection
           id="caers"
-          title="complaint reports (CAERS)"
+          title="Complaint reports (CAERS)"
           blurb="Foods with FDA-hosted adverse event reports. Not a recall — unverified; report ≠ causation."
           products={caers}
           loading={showSkeletons}

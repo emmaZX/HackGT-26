@@ -70,9 +70,9 @@ export function kicker(p: ProductCard) {
   const tier = p.source_tier || p.signal?.source_tier;
   let source = "Online reports";
   if (recall) source = "Official notice";
-  else if (tier === "caers") source = "CAERS reports";
-  else if (internetFirst) source = "Spotted online first";
-  else if (tier === "unofficial") source = "Community / open web";
+  else if (tier === "caers") source = "FDA complaint reports · no recall yet";
+  else if (internetFirst) source = "Spotted online first · no recall yet";
+  else if (tier === "unofficial") source = "No recall yet";
   return {
     status: statusTag ? STATUS_TEXT[statusTag] : null,
     isRecall: !!recall,

@@ -7,6 +7,7 @@ import re
 from datetime import datetime
 
 from ..config import get_settings
+from ..grok import ai_method, ai_text, grok_available
 
 # Strong first-person / outbreak language.
 COMPLAINT_PATTERNS = [
@@ -227,7 +228,7 @@ def _looks_stale(blob: str, recency_days: int) -> bool:
 
 def _llm_triage(blob: str, product_hint: str, url: str | None) -> dict | None:
     settings = get_settings()
-    if not settings.gemini_api_key:
+    if not (settings.gemini_api_key or grok_available()):
         return None
     try:
         import httpx
@@ -247,18 +248,9 @@ def _llm_triage(blob: str, product_hint: str, url: str | None) -> dict | None:
         f"Product: {product_hint}\nURL: {url or ''}\n\nPAGE:\n{blob[:2800]}"
     )
     try:
-        response = httpx.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-            headers={"x-goog-api-key": settings.gemini_api_key},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30,
-        )
-        if response.status_code >= 400:
+        text = ai_text(prompt, timeout=30)
+        if not text:
             return None
-        text = ""
-        for candidate in response.json().get("candidates", []):
-            for part in candidate.get("content", {}).get("parts", []):
-                text += part.get("text") or ""
         match = re.search(r"\{[\s\S]*\}", text)
         if not match:
             return None
@@ -273,7 +265,7 @@ def _llm_triage(blob: str, product_hint: str, url: str | None) -> dict | None:
             "label": label,
             "score": float(data.get("score") or 0.5),
             "reason": str(data.get("reason") or "")[:240],
-            "method": "gemini",
+            "method": ai_method(),
             "stale": bool(data.get("stale")),
         }
     except Exception:

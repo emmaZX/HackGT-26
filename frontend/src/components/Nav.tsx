@@ -51,7 +51,7 @@ export function Nav() {
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="search"
+              placeholder="Search"
               aria-label="Search products or problems"
               className="block h-[42px] w-full rounded-full bg-[#ecf0fc] px-5 font-mulish text-[16px] tracking-[-0.04em] text-[#031d4e] shadow-[0_3px_6px_rgba(3,29,78,0.12)] outline-none focus:shadow-[0_0_0_3px_rgba(192,212,239,0.7)]"
             />

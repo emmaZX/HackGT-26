@@ -14,6 +14,8 @@ import { Disclaimer } from "@/components/Disclaimer";
 import { POSTED_EVENT } from "@/components/PostModal";
 import { BackArrow } from "@/components/BackArrow";
 import { ProductImage } from "@/components/ProductImage";
+import { LeadTime } from "@/components/LeadTime";
+import { CaseSummary } from "@/components/CaseSummary";
 import { CategoryPanel } from "@/components/CategoryPanel";
 
 function ProductInner() {
@@ -137,7 +139,7 @@ function ProductInner() {
         <article className="card min-h-[742px] p-6 md:px-[44px] md:py-[40px]">
           <section>
             <div className="flex flex-wrap items-center gap-3">
-              <h2 className="section-title">what&apos;s going on</h2>
+              <h2 className="section-title">What&apos;s going on</h2>
               {status && <StatusBadge label={status} />}
             </div>
             <p className="mt-4 font-mulish text-[22px] font-semibold leading-snug tracking-[-0.04em]">
@@ -162,26 +164,30 @@ function ProductInner() {
                 </a>
               </div>
             )}
+            {recall?.recall_date && <LeadTime reports={product.reports} recallDate={recall.recall_date} />}
           </section>
 
+          <CaseSummary slug={product.slug} reports={product.reports} />
+
+
           <section className="mt-10">
-            <h2 className="section-title">why it&apos;s showing up</h2>
+            <h2 className="section-title">Why it&apos;s showing up</h2>
             <p className="mt-4 max-w-[65ch] text-[15px] leading-relaxed">{signal.explanation}</p>
             <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-5">
-              <Metric label="reports" value={signal.report_count} />
-              <Metric label="different people" value={signal.independent_count} />
-              <Metric label="last 7 days" value={signal.recent_report_count} />
+              <Metric label="Reports" value={signal.report_count} />
+              <Metric label="Different people" value={signal.independent_count} />
+              <Metric label="Last 7 days" value={signal.recent_report_count} />
               <Metric
-                label="vs. week before"
+                label="Vs. week before"
                 value={signal.velocity_percent != null ? `${signal.velocity_percent > 0 ? "+" : ""}${signal.velocity_percent}%` : "—"}
               />
-              <Metric label="cities" value={signal.geographic_count} />
+              <Metric label="Cities" value={signal.geographic_count} />
             </dl>
           </section>
 
           {!!signal.issues.length && (
             <section className="mt-10">
-              <h2 className="section-title">what people mention</h2>
+              <h2 className="section-title">What people mention</h2>
               <div className="mt-4 flex flex-wrap gap-2">
                 {signal.issues.map((item) => (
                   <Link
@@ -198,7 +204,7 @@ function ProductInner() {
                 ))}
                 {issue && (
                   <Link href={`/product/${product.slug}`} scroll={false} className="px-3 py-[6px] text-[14px] text-[#627290] underline underline-offset-4">
-                    show all
+                    Show all
                   </Link>
                 )}
               </div>
@@ -207,7 +213,7 @@ function ProductInner() {
 
           {!!product.timeline.length && (
             <section className="mt-10">
-              <h2 className="section-title">timeline</h2>
+              <h2 className="section-title">Timeline</h2>
               <p className="mt-3 text-[13px] text-[#627290]">
                 How reports built up before the official notice. This doesn&apos;t mean the app predicted the recall.
               </p>
@@ -233,7 +239,7 @@ function ProductInner() {
 
           <section className="mt-10">
             <div className="flex flex-wrap items-end justify-between gap-3">
-              <h2 className="section-title">from the internet ({internet.length})</h2>
+              <h2 className="section-title">From the internet ({internet.length})</h2>
               <button
                 type="button"
                 disabled={discovering}
@@ -255,7 +261,7 @@ function ProductInner() {
                 }}
                 className="rounded-full border border-[#c0d4ef] px-4 py-[6px] text-[14px] hover:bg-[#f8f8ff] disabled:opacity-50"
               >
-                {discovering ? "running…" : "run complaint agents"}
+                {discovering ? "Running…" : "Run complaint agents"}
               </button>
             </div>
             {discoverNote && <p className="mt-3 text-[13px] text-[#627290]">{discoverNote}</p>}
@@ -270,7 +276,7 @@ function ProductInner() {
           </section>
 
           <section className="mt-10">
-            <h2 className="section-title">on this site ({onSite.length})</h2>
+            <h2 className="section-title">On this site ({onSite.length})</h2>
             <div className="mt-5">
               <EvidenceList reports={onSite} emptyMessage="No neighbor notes on this product yet." />
             </div>
@@ -297,11 +303,11 @@ function ProductInner() {
               </div>
             )}
             <dl className="grid gap-3 text-[14px]">
-              <Fact label="brand" value={product.brand} />
-              <Fact label="model" value={product.model} />
-              <Fact label="category" value={product.category} />
-              <Fact label="maker" value={product.manufacturer} />
-              <Fact label="barcode" value={product.upc} />
+              <Fact label="Brand" value={product.brand} />
+              <Fact label="Model" value={product.model} />
+              <Fact label="Category" value={product.category} />
+              <Fact label="Maker" value={product.manufacturer} />
+              <Fact label="Barcode" value={product.upc} />
             </dl>
             {product.summary && (
               <p className="mt-5 text-[13px] leading-relaxed text-[#627290]">{product.summary}</p>
@@ -317,7 +323,7 @@ function ProductInner() {
 
       {!!signal.geography.length && (
         <section className="mt-12">
-          <h2 className="section-title">where reports come from</h2>
+          <h2 className="section-title">Where reports come from</h2>
           <GeoMap geography={signal.geography} className="mt-[13px] h-[320px] md:h-[380px]" />
         </section>
       )}
@@ -325,7 +331,7 @@ function ProductInner() {
       <CategoryPanel category={product.category} slug={product.slug} />
 
       <section className="mt-12">
-        <h2 className="section-title">community</h2>
+        <h2 className="section-title">Community</h2>
         <div className="mt-5">
           <Community slug={product.slug} posts={product.posts} onChange={load} />
         </div>

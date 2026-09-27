@@ -7,10 +7,12 @@ from sqlalchemy.orm import Session
 
 from .x_sweep_job import router as x_sweep_router
 from .categories import router as categories_router
+from .case_summary import router as case_summary_router
 
 from .bootstrap import bootstrap_catalog, start_home_scrape_background
 from .cpsc_sync import start_cpsc_sync_background
 from .image_lookup import start_image_lookup_background
+from .venue_check import start_venue_check_background
 from .config import get_settings
 from .auth import AuthUser, require_user
 from .database import Base, SessionLocal, engine, ensure_schema, get_db
@@ -41,6 +43,7 @@ with SessionLocal() as session:
 start_home_scrape_background(home_slugs)
 start_cpsc_sync_background()
 start_image_lookup_background()
+start_venue_check_background()
 
 
 def _warm_feed_cache() -> None:
@@ -74,6 +77,7 @@ app.add_middleware(
 
 app.include_router(x_sweep_router)
 app.include_router(categories_router)
+app.include_router(case_summary_router)
 
 class ReportIn(BaseModel):
     product_slug: str | None = None

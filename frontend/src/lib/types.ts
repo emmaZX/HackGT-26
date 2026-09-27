@@ -83,6 +83,8 @@ export type ReportCard = {
   text: string;
   excerpt: string;
   created_at: string | null;
+  /** When the complaint itself happened or was posted (not when we scraped it) */
+  observed_at?: string | null;
   location: Location;
   is_user_generated: boolean;
   is_duplicate: boolean;

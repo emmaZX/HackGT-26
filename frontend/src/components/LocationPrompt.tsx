@@ -35,7 +35,7 @@ export function LocationPrompt({ onChange }: { onChange: (city: string | null) =
   return (
     <div className="card mb-8 flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
       <div className="min-w-0 flex-1">
-        <div className="font-raleway text-[18px] font-medium tracking-[-0.04em]">see what&apos;s happening near you?</div>
+        <div className="font-raleway text-[18px] font-medium tracking-[-0.04em]">See what&apos;s happening near you?</div>
         <p className="mt-1 text-sm text-[#627290]">We only keep a city name, never an address. Skipping is fine.</p>
       </div>
       <div className="flex flex-wrap gap-2 text-sm">

@@ -6,6 +6,7 @@ import json
 import re
 
 from ..config import get_settings
+from ..grok import ai_method, ai_text, grok_available
 from ..security import sanitize_text
 
 # Lightweight brand hints when Gemini is unavailable.
@@ -52,7 +53,7 @@ def normalize_product_identity(
         return hinted
 
     settings = get_settings()
-    if settings.gemini_api_key:
+    if settings.gemini_api_key or grok_available():
         try:
             return _gemini_normalize(name, brand_in, context or "", settings)
         except Exception:
@@ -105,18 +106,9 @@ def _gemini_normalize(name: str, brand: str, context: str, settings) -> dict:
         f"User brand: {brand or '(none)'}\n"
         f"Report context (may be empty): {context[:500]}\n"
     )
-    response = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-        headers={"x-goog-api-key": settings.gemini_api_key},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=25,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"gemini {response.status_code}")
-    text = ""
-    for candidate in response.json().get("candidates", []):
-        for part in candidate.get("content", {}).get("parts", []):
-            text += part.get("text") or ""
+    text = ai_text(prompt, timeout=25)
+    if not text:
+        raise RuntimeError("AI naming unavailable")
     match = re.search(r"\{[\s\S]*\}", text)
     data = json.loads(match.group(0) if match else text)
     brand_out = sanitize_text(str(data.get("brand") or "Unknown"), 120) or "Unknown"
@@ -130,7 +122,7 @@ def _gemini_normalize(name: str, brand: str, context: str, settings) -> dict:
         "name": name_out,
         "category": category,
         "aliases": _uniq(alias_list),
-        "method": "gemini",
+        "method": ai_method(),
     }
 
 

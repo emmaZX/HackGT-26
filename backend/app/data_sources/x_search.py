@@ -51,6 +51,18 @@ def _status_id(url: str) -> str | None:
     return m.group(2) if m else None
 
 
+def status_time(url_or_id: str) -> datetime | None:
+    """Exact posting time decoded from the X post ID (IDs embed a millisecond timestamp)."""
+    m = STATUS_URL.search(url_or_id or "")
+    raw = m.group(2) if m else (url_or_id or "")
+    if not raw.isdigit():
+        return None
+    try:
+        return datetime.utcfromtimestamp(((int(raw) >> 22) + 1288834974657) / 1000)
+    except (ValueError, OverflowError):
+        return None
+
+
 def _parse_json_array(text: str) -> list[dict]:
     start, end = text.find("["), text.rfind("]")
     if start == -1 or end <= start:
