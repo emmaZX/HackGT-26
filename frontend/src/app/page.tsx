@@ -11,6 +11,12 @@ import { GeoMap } from "@/components/GeoMap";
 import { EvidenceList, isInternetReport, isUsableSourceUrl } from "@/components/EvidenceList";
 import { POSTED_EVENT } from "@/components/PostModal";
 
+/**
+ * The three feed sections (community / official / CAERS) are hidden to match the Figma home page.
+ * Their data still feeds the carousel. Set to true to show them again.
+ */
+const SHOW_TIER_SECTIONS = false;
+
 export default function HomePage() {
   // Start as null on both server and client; the saved city is read after mount.
   // Reading localStorage during render made the server and browser HTML disagree.
@@ -98,34 +104,38 @@ export default function HomePage() {
         </div>
       </section>
 
-      <TierSection
-        id="unofficial"
-        title="community / open web"
-        blurb="Neighbor posts, iWasPoisoned, and Reddit-style conjecture — the early signal, not a verdict."
-        products={unofficial}
-        loading={showSkeletons}
-        empty="No community reports yet. Post with + or search a food brand."
-        disclaimer="Unofficial chatter is a heads-up, not proof of harm."
-      />
+      {SHOW_TIER_SECTIONS && (
+        <>
+        <TierSection
+          id="unofficial"
+          title="community / open web"
+          blurb="Neighbor posts, iWasPoisoned, and Reddit-style conjecture — the early signal, not a verdict."
+          products={unofficial}
+          loading={showSkeletons}
+          empty="No community reports yet. Post with + or search a food brand."
+          disclaimer="Unofficial chatter is a heads-up, not proof of harm."
+        />
 
-      <TierSection
-        id="official"
-        title="urgent official items"
-        blurb="Newest Ongoing FDA/USDA-FSIS recalls and active outbreak watches only — resolved or stale notices are removed."
-        products={official}
-        loading={showSkeletons}
-        empty="No recent Ongoing official items right now."
-      />
+        <TierSection
+          id="official"
+          title="urgent official items"
+          blurb="Newest Ongoing FDA/USDA-FSIS recalls and active outbreak watches only — resolved or stale notices are removed."
+          products={official}
+          loading={showSkeletons}
+          empty="No recent Ongoing official items right now."
+        />
 
-      <TierSection
-        id="caers"
-        title="complaint reports (CAERS)"
-        blurb="Foods with FDA-hosted adverse event reports. Not a recall — unverified; report ≠ causation."
-        products={caers}
-        loading={showSkeletons}
-        empty="No CAERS items loaded yet."
-        disclaimer="CAERS reports are largely voluntary and do not prove a product caused harm."
-      />
+        <TierSection
+          id="caers"
+          title="complaint reports (CAERS)"
+          blurb="Foods with FDA-hosted adverse event reports. Not a recall — unverified; report ≠ causation."
+          products={caers}
+          loading={showSkeletons}
+          empty="No CAERS items loaded yet."
+          disclaimer="CAERS reports are largely voluntary and do not prove a product caused harm."
+        />
+        </>
+      )}
 
       <div className="mt-10 grid gap-10 lg:grid-cols-[710px_1fr] lg:gap-[53px]">
         <section aria-labelledby="area-title">
