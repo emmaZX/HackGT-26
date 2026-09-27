@@ -55,28 +55,30 @@ def _heuristic_queries(
     illness = '("threw up" OR vomiting OR diarrhea OR "food poisoning" OR "got sick" OR nauseous)'
     batch = '(lot OR batch OR "use by" OR "best by" OR "sell by")'
     recent = f"({year} OR \"this week\" OR \"last month\" OR recently OR today)"
-    # Primary unofficial path: iWasPoisoned / grocery illness chatter — not category watches.
+    # Primary unofficial path: grocery-industry iWasPoisoned only (not restaurants).
     queries = [
-        f'site:iwaspoisoned.com {product}',
-        f'site:iwaspoisoned.com {product} (grocery OR sick OR restaurant)',
-        f'{product} {illness} (grocery OR Costco OR Walmart OR "food poisoning") {recent} -site:fda.gov',
+        f'site:iwaspoisoned.com/industry/grocery_or_supermarket {product}',
+        f'site:iwaspoisoned.com/industry/grocery_or_supermarket {product} (sick OR vomiting OR diarrhea)',
+        f'{product} {illness} (grocery OR Costco OR Walmart OR supermarket) {recent} -site:fda.gov',
         f'{product} {illness} (family OR "my kids" OR "three people" OR household) {recent}',
-        f'{product} {batch} {illness} site:iwaspoisoned.com',
-        f'"{product}" ("taste weird" OR "smell weird" OR "off smell") (sick OR vomiting) {recent}',
+        f'{product} {batch} {illness} site:iwaspoisoned.com/industry/grocery_or_supermarket',
+        f'"{product}" ("taste weird" OR "smell weird" OR "off smell") (sick OR vomiting) grocery {recent}',
     ]
     if recall_hint:
         hazard = (recall_hint.get("hazard") or "").split()[0:3]
         if hazard:
             queries.insert(
                 0,
-                f'{product} {" ".join(hazard)} site:iwaspoisoned.com OR site:reddit.com sick OR illness {recent}',
+                f'{product} {" ".join(hazard)} site:iwaspoisoned.com/industry/grocery_or_supermarket OR site:reddit.com sick OR illness {recent}',
             )
     else:
         queries = [q for q in queries if " recall " not in f" {q.lower()} "]
     if extra:
-        queries.insert(0, f"{product} {extra} site:iwaspoisoned.com {recent}")
+        queries.insert(0, f"{product} {extra} site:iwaspoisoned.com/industry/grocery_or_supermarket {recent}")
     if (category or "").lower() == "food":
-        queries.append(f'{product} site:iwaspoisoned.com ("1 star" OR sick OR vomiting) {recent}')
+        queries.append(
+            f'{product} site:iwaspoisoned.com/industry/grocery_or_supermarket (sick OR vomiting) {recent}'
+        )
     return queries
 
 
@@ -103,11 +105,13 @@ def _llm_queries(
     prompt = (
         "You are the Query Generator agent for Recall Me Maybe. "
         "Write 4-6 hyper-specific web search queries to find RECENT first-person consumer complaints "
-        "on Reddit, iwaspoisoned.com, Facebook groups, Nextdoor, Discord, TikTok comments — "
+        "on Reddit and iwaspoisoned.com/industry/grocery_or_supermarket (grocery/supermarket ONLY — "
+        "never restaurants, fast food, or hotels), Facebook groups, Nextdoor — "
         "NOT FDA/CDC pages, not press releases, not year-old blogs. "
         "Prefer illness language (vomiting, diarrhea, food poisoning, batch/lot, multiple people). "
         f"Bias toward the last {get_settings().discovery_recency_days} days / this year only. "
-        "Include site:reddit.com or site:iwaspoisoned.com in most queries. "
+        "Include site:reddit.com or site:iwaspoisoned.com/industry/grocery_or_supermarket in most queries. "
+        "Never use restaurant/QSR iWasPoisoned paths. "
         "Avoid the word 'recall' unless the product is already under an Ongoing notice. "
         "Return ONLY a JSON list of strings.\n\n"
         f"Context: {json.dumps(context)[:1200]}"

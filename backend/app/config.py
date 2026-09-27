@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # Live bootstrap (hybrid demo path)
     seed_demo: bool = False
-    seed_fake_posts: bool = True
+    seed_fake_posts: bool = False
     cpsc_recall_limit: int = 25
     fda_food_recall_limit: int = 25
     # Light home scrape — default 0 so category Exa is not the home filler.
@@ -56,17 +56,24 @@ class Settings(BaseSettings):
     home_scrape_queries: int = 1
     search_scrape_pages: int = 5
     discovery_cooldown_minutes: int = 20
-    # Prefer recent complaints / Ongoing notices (days).
+    # Prefer recent complaints / Ongoing notices (days) — past couple of months.
     discovery_recency_days: int = 90
+    # Min URL-backed reports to show an unofficial card (1 = surface the corpus;
+    # multi-URL patterns still rank higher via evidence_count / report_count).
+    community_min_url_reports: int = 1
+    # Wide scrape so specific product patterns can emerge across ~90d.
+    community_seed_queries: int = 20
+    community_seed_pages: int = 80
+    community_seed_per_query: int = 8
 
-    # CAERS spike engine
-    caers_lookback_days: int = 270
+    # CAERS spike engine — keep closer to the recency window for home honesty.
+    caers_lookback_days: int = 90
     caers_fetch_limit: int = 3000
     caers_spike_min_reports: int = 5
     caers_spike_velocity: float = 2.0
-    official_recall_max_age_days: int = 120
-    fsis_recall_limit: int = 80
-    outbreak_limit: int = 30
+    official_recall_max_age_days: int = 90
+    fsis_recall_limit: int = 40
+    outbreak_limit: int = 15
 
     @property
     def cors_origin_list(self) -> list[str]:

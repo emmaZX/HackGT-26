@@ -386,6 +386,11 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
     )
     products = special + extras
     for product in products:
+        reports = (
+            db.query(Report)
+            .filter(Report.product_id == product.id, Report.is_duplicate.is_(False))
+            .all()
+        )
         signal = compute_signal(db, product)
         tier = signal.get("source_tier") or "unofficial"
         # Keep official, CAERS grocery items, and unofficial clusters with signal.
@@ -397,14 +402,45 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
                 continue
             if re.search(r"exemption\s*4", f"{product.brand} {product.name}", re.I):
                 continue
-        elif signal["severity_key"] == "no_significant_signal" and not signal["official_recall"]:
-            continue
+            # CAERS home items must still be within lookback (use newest report date).
+            from ..config import get_settings as _gs
+            from .evidence_schema import within_recency
+
+            newest = max((r.incident_date or r.created_at for r in reports), default=None)
+            if newest and not within_recency(newest, days=_gs().caers_lookback_days):
+                continue
         else:
             if (product.slug or "").startswith("caers-"):
+                continue
+            # Unofficial: require URL-backed recent evidence — never invented community seeds.
+            from ..config import get_settings as _gs
+            from .evidence_schema import within_recency
+
+            settings = _gs()
+            url_reports = [
+                r
+                for r in reports
+                if r.source_url
+                and r.source in {"web", "reddit", "news", "iwaspoisoned"}
+                and r.incident_date is not None
+                and within_recency(r.incident_date, days=settings.discovery_recency_days)
+            ]
+            hosts = {(r.source_url or "") for r in url_reports}
+            # Surface specific products from the scrape; multi-URL patterns rank higher.
+            if len(hosts) < max(1, settings.community_min_url_reports):
+                continue
+            if not url_reports:
                 continue
         local = False
         if visitor_city:
             local = any(visitor_city.lower() == g["label"].lower() for g in signal["geography"])
+        # Final quality gate — never show legalese / unidentified junk on home.
+        from .glance_titles import is_sensible_product
+
+        if not is_sensible_product(product.brand, product.name, slug=product.slug):
+            continue
+        # Attach reports so product_card can serialize linked evidence URLs.
+        product.reports = reports  # type: ignore[attr-defined]
         cards.append({"product": product, "signal": signal, "local": local})
 
     def sort_key(item: dict) -> tuple:
@@ -429,6 +465,9 @@ def feed_cards(db: Session, visitor_city: str | None = None) -> list[dict]:
             spike_ratio,
             # Newer recall dates first (ISO strings sort lexicographically).
             f"_{recall_date}",
+            # Unofficial: multi-source patterns first, then by volume.
+            -signal.get("unique_source_ids", 0) if tier == "unofficial" else 0,
+            -signal.get("geographic_count", 0) if tier == "unofficial" else 0,
             -signal.get("internal_strength", 0),
             -signal.get("report_count", 0),
         )

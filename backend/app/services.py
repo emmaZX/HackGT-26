@@ -270,10 +270,25 @@ def search_catalog(db: Session, query: str, live: bool = True) -> dict:
             )
         )
         .order_by(Report.created_at.desc())
-        .limit(20)
+        .limit(40)
         .all()
     )
+    from .pipeline.evidence_schema import text_has_ancient_year, within_recency
+
+    def _report_ok(report: Report) -> bool:
+        blob = f"{report.title or ''} {report.text or ''} {report.source_url or ''}"
+        if text_has_ancient_year(blob):
+            return False
+        if report.source in {"web", "reddit", "news", "iwaspoisoned"}:
+            if not report.source_url or not report.incident_date:
+                return False
+            if not within_recency(report.incident_date):
+                return False
+        return True
+
+    reports = [r for r in reports if _report_ok(r)][:20]
     semantic = similar_reports(db, q, limit=12)
+    semantic = [(report, score) for report, score in semantic if _report_ok(report)]
     # Weak embedding hits should not hide a true miss.
     if not strong_products and not reports:
         semantic = [(report, score) for report, score in semantic if score >= 0.72]
@@ -773,24 +788,70 @@ def run_discovery(
             notes.append(f"dup {final_url}")
             continue
         extracted = extract_report(item["text"], f"{product.brand} {product.name}")
-        source = _source_label(final_url)
-        geo = item.get("geo") or {}
         triage = item.get("triage") or {}
-        excerpt = (item.get("snippet") or item["text"])[:220]
+        text = item.get("text") or ""
+        title = item.get("title") or ""
+        published = (item.get("page") or {}).get("published_date") or item.get("published_date")
+        from .pipeline.evidence_schema import (
+            parse_observed_at,
+            source_label_for_url,
+            validate_community_evidence,
+            is_allowed_iwaspoisoned_url,
+        )
+
+        if not is_allowed_iwaspoisoned_url(final_url, title=title, snippet=item.get("snippet") or ""):
+            notes.append(f"reject {final_url}: not grocery iWasPoisoned")
+            continue
+
+        observed = parse_observed_at(
+            text=f"{title}\n{text}",
+            url=final_url,
+            published=published,
+        )
+        if observed is None:
+            notes.append(f"reject {final_url}: no observed_at")
+            continue
+        evidence, reason = validate_community_evidence(
+            {
+                "source_url": final_url,
+                "excerpt": (item.get("snippet") or text)[:500],
+                "brand": product.brand or "",
+                "name": product.name or title or "Food item",
+                "observed_at": observed,
+                "triage_label": "first_person_complaint",
+                "confidence": float(triage.get("score") or 0.5),
+                "confidence_method": "gemini"
+                if (triage.get("method") or "").startswith("gemini")
+                else "heuristic",
+                "location_label": None,
+            }
+        )
+        if not evidence:
+            notes.append(f"reject {final_url}: {reason}")
+            continue
+
+        source = source_label_for_url(final_url)
+        geo = item.get("geo") or {}
+        loc = geo.get("location_label")
+        if loc and loc.lower() not in f"{title} {text}".lower():
+            loc = None
+        excerpt = evidence.excerpt[:220]
         if triage.get("label"):
             excerpt = f"[{triage.get('label')}] {excerpt}"[:220]
         report = Report(
             product_id=product.id,
             source=source,
             source_id=url_key[:240],
-            source_url=final_url[:700],
+            source_url=str(evidence.source_url)[:700],
             title=item.get("title"),
-            text=item["text"][:4000],
+            text=text[:4000],
             excerpt=excerpt,
+            incident_date=evidence.observed_at,
             is_user_generated=False,
-            location_label=geo.get("location_label"),
-            location_precision=geo.get("location_precision") or "none",
-            location_source=geo.get("location_source") or "none",
+            location_label=loc,
+            location_precision="city" if loc else "none",
+            location_source="inferred" if loc else "none",
+            extra_json=f'{{"confidence":{evidence.confidence},"method":"{evidence.confidence_method}"}}',
         )
         db.add(report)
         db.flush()
@@ -806,7 +867,6 @@ def run_discovery(
                 "triage": triage.get("label"),
             }
         )
-
     # Confirm official status when triage saw recall coverage.
     coverage = pipeline.get("recall_coverage") or []
     if coverage:
@@ -843,10 +903,7 @@ def run_discovery(
         )
     )
     db.commit()
-    if ingested and settings.seed_fake_posts:
-        from .bootstrap import seed_posts_from_ingest
-
-        seed_posts_from_ingest(db, product, findings)
+    # Never invent neighbor posts after ingest.
     return {
         "provider": provider,
         "queries": queries,

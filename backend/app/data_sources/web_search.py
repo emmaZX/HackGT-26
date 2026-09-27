@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..config import get_settings
@@ -12,6 +13,7 @@ class SearchHit:
     snippet: str
     provider: str
     query: str
+    published_date: str | None = None
 
 
 def niche_queries(
@@ -25,13 +27,13 @@ def niche_queries(
         product_name, extra
     )
     if is_food:
-        # Unofficial: iWasPoisoned + grocery/illness first; Reddit is supplementary.
+        # Unofficial: grocery-industry iWasPoisoned + grocery illness first; Reddit supplementary.
         base = [
-            f'site:iwaspoisoned.com {product_name}',
-            f'site:iwaspoisoned.com {product_name} (grocery OR restaurant OR brand OR sick)',
-            f'{product_name} site:iwaspoisoned.com (vomiting OR diarrhea OR "food poisoning")',
+            f'site:iwaspoisoned.com/industry/grocery_or_supermarket {product_name}',
+            f'site:iwaspoisoned.com/industry/grocery_or_supermarket {product_name} (sick OR vomiting)',
+            f'{product_name} site:iwaspoisoned.com/industry/grocery_or_supermarket ("food poisoning" OR diarrhea)',
             f'{product_name} ("food poisoning" OR "got sick" OR vomiting) (grocery OR Costco OR Walmart) -site:fda.gov -site:cdc.gov',
-            f'{product_name} site:reddit.com (sick OR vomiting OR diarrhea OR "food poisoning" OR nauseous)',
+            f'{product_name} site:reddit.com (sick OR vomiting OR diarrhea OR "food poisoning") (Costco OR Walmart OR grocery)',
         ]
     else:
         # Physical / appliance queries — only used when a specific non-food product is searched.
@@ -262,7 +264,7 @@ def _exa_search(queries: list[str], settings, limit: int) -> list[SearchHit]:
                 "query": query,
                 "numResults": limit,
                 "type": "auto",
-                "contents": {"text": False},
+                "contents": {"text": {"maxCharacters": 400}},
                 "startPublishedDate": start,
                 "includeDomains": preferred_domains,
             },
@@ -270,7 +272,7 @@ def _exa_search(queries: list[str], settings, limit: int) -> list[SearchHit]:
                 "query": query,
                 "numResults": limit,
                 "type": "auto",
-                "contents": {"text": False},
+                "contents": {"text": {"maxCharacters": 400}},
                 "startPublishedDate": start,
             },
         ]
@@ -294,9 +296,10 @@ def _exa_search(queries: list[str], settings, limit: int) -> list[SearchHit]:
                     SearchHit(
                         title=item.get("title") or item.get("url"),
                         url=item["url"],
-                        snippet=(item.get("text") or "")[:280],
+                        snippet=(item.get("text") or item.get("summary") or "")[:280],
                         provider="exa",
                         query=query,
+                        published_date=item.get("publishedDate") or item.get("published_date"),
                     )
                 )
             if batch:
@@ -307,16 +310,24 @@ def _exa_search(queries: list[str], settings, limit: int) -> list[SearchHit]:
 def _brave_search(queries: list[str], settings, limit: int) -> list[SearchHit]:
     import httpx
 
+    # Brave freshness: pw = past week, pm = past month. Map ~60d → past month.
+    freshness = "pm" if settings.discovery_recency_days <= 45 else "pm"
     hits: list[SearchHit] = []
     for query in queries:
         response = httpx.get(
             "https://api.search.brave.com/res/v1/web/search",
             headers={"X-Subscription-Token": settings.brave_search_api_key, "Accept": "application/json"},
-            params={"q": query, "count": limit},
+            params={"q": query, "count": limit, "freshness": freshness},
             timeout=20,
         )
         response.raise_for_status()
         for item in response.json().get("web", {}).get("results", []):
+            age = item.get("age") or ""
+            # Drop clearly ancient Brave age strings (e.g. "18 years ago").
+            if re.search(r"\b([3-9]|\d{2,})\s+years?\s+ago\b", age, re.I):
+                continue
+            if re.search(r"\b(1[2-9]|[2-9]\d)\s+months?\s+ago\b", age, re.I):
+                continue
             hits.append(
                 SearchHit(
                     title=item.get("title") or item.get("url"),

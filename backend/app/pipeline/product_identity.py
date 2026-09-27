@@ -135,94 +135,16 @@ def _gemini_normalize(name: str, brand: str, context: str, settings) -> dict:
 
 
 def simplify_food_item(*, brand: str | None, name: str | None, fallback: str = "Food item") -> dict:
-    """
-    Turn regulator notice titles into short grocery-style item names.
-    Returns {brand, name} — name is the consumer-facing item.
-    """
-    brand_raw = _clean_listish(brand)
-    name_raw = _clean_listish(name) or brand_raw or fallback
-    blob = name_raw
+    """Glanceable grocery title. Returns {brand, name}; falls back if junk."""
+    from .glance_titles import glance_title
 
-    # Strip common FSIS / FDA notice wrappers.
-    patterns = [
-        r"^FSIS\s+Issues\s+Public\s+Health\s+Alert\s+for\s+",
-        r"^FSIS\s+Issues\s+Public\s+Health\s+Alert\s+",
-        r"^USDA[- ]?FSIS\s+",
-        r"^FDA\s+Outbreak\s+Watch\s*[—\-:]?\s*",
-        r"^Public\s+Health\s+Alert\s+for\s+",
-    ]
-    for pat in patterns:
-        blob = re.sub(pat, "", blob, flags=re.I).strip()
-
-    # "Company Recalls PRODUCT Due to …"
-    m = re.match(r"^(.*?)\s+Recalls?\s+(.*?)\s+Due\s+to\b(.*)$", blob, re.I)
-    if m:
-        company = m.group(1).strip()
-        product = m.group(2).strip()
-        return {
-            "brand": _short_brand(brand_raw or company),
-            "name": _short_item(product),
-        }
-
-    # "… for PRODUCT due to HAZARD"
-    m = re.match(r"^(.*?)\s+due\s+to\b.*$", blob, re.I)
-    if m and len(m.group(1).strip()) >= 4:
-        blob = m.group(1).strip()
-
-    # "PRODUCT linked to / associated with …"
-    blob = re.sub(
-        r"\s+(linked|associated)\s+to\b.*$",
-        "",
-        blob,
-        flags=re.I,
-    ).strip()
-
-    # Leftover "Company Recalls PRODUCT" without Due to
-    m = re.match(r"^(.*?)\s+Recalls?\s+(.*)$", blob, re.I)
-    if m and len(m.group(2).strip()) >= 3:
-        company = m.group(1).strip()
-        product = m.group(2).strip()
-        return {
-            "brand": _short_brand(brand_raw or company),
-            "name": _short_item(product),
-        }
-
-    # Pathogen — Product → keep product as name
-    if "—" in blob or " - " in blob:
-        parts = re.split(r"\s*[—\-]\s*", blob, maxsplit=1)
-        if len(parts) == 2 and parts[1].strip():
-            left, right = parts[0].strip(), parts[1].strip()
-            # Prefer the food product side as the title.
-            if _looks_food(right.lower()) or re.search(
-                r"not yet identified|not identified|unidentified", right, re.I
-            ):
-                item = right
-                brand_out = brand_raw if brand_raw and "outbreak" not in brand_raw.lower() else ""
-                if re.search(r"not yet identified|not identified", item, re.I):
-                    item = "Unidentified food"
-                return {"brand": _short_brand(brand_out) or "FDA watch", "name": _short_item(item)}
-            blob = right
-
-    # HelloFresh meal-kit phrasing → short item
-    if re.search(r"hello\s*fresh", blob, re.I):
-        if re.search(r"ground\s+beef", blob, re.I):
-            return {"brand": "HelloFresh", "name": "Ground beef"}
-        return {"brand": "HelloFresh", "name": "Meal kit"}
-
-    item = _short_item(blob)
-    brand_out = _short_brand(brand_raw)
-    if brand_out and brand_out.lower() == item.lower():
-        brand_out = ""
-    # If brand still looks like a full alert sentence, drop it.
-    if brand_out and (
-        "public health alert" in brand_out.lower()
-        or "issues public" in brand_out.lower()
-        or len(brand_out) > 48
-    ):
-        brand_out = ""
-    if not item or item.lower() in {"fsis", "fda", "usda", "alert"}:
-        item = fallback
-    return {"brand": brand_out or "Unknown", "name": item}
+    titled = glance_title(brand=brand, name=name)
+    if titled:
+        return titled
+    # Last resort — still keep it short; caller may reject via is_sensible_product.
+    raw = (name or brand or fallback or "Food item").strip()
+    raw = re.sub(r"\s+", " ", raw)[:34]
+    return {"brand": (brand or "Unknown")[:28], "name": raw or fallback}
 
 
 def _clean_listish(value: str | None) -> str:

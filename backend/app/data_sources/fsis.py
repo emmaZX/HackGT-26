@@ -158,6 +158,34 @@ def _normalize(row: dict) -> dict | None:
         )
 
     brand, name = _brand_name(title, row.get("field_establishment") or "")
+    # Drop import-violation legalese and other non-grocery titles.
+    from ..pipeline.glance_titles import is_sensible_product, glance_title
+
+    titled = glance_title(brand=brand, name=name)
+    if not titled or not is_sensible_product(titled["brand"], titled["name"]):
+        return None
+    brand, name = titled["brand"], titled["name"]
+
+    # Import / misbranding notices without a clear grocery item stay out of the shelf.
+    reason_l = reason.lower()
+    if any(
+        x in reason_l
+        for x in (
+            "import violation",
+            "without the benefit of inspection",
+            "without benefit of inspection",
+            "false usda",
+            "misbranded",
+        )
+    ) and not re.search(
+        r"\b(ground|chicken|turkey|beef|pork|sausage|deli|ham|nugget|bacon)\b",
+        name,
+        re.I,
+    ):
+        # Still allow clear proteins (Star Meat raw pork/beef/goat).
+        if not re.search(r"\b(pork|beef|goat|chicken|turkey|meat)\b", f"{title} {name}", re.I):
+            return None
+
     states = _clean_text(row.get("field_states") or "")
     nationwide = not states or "nationwide" in states.lower() or states.count(",") >= 8
     outbreak = row.get("field_related_to_outbreak") in (True, "True", "true", 1, "1")

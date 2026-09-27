@@ -22,6 +22,7 @@ from .data_sources.caers import fetch_recent_events as fetch_caers_events, produ
 from .database import SessionLocal
 from .models import Comment, DiscoveryRun, Issue, Like, Post, Product, Recall, Report, ReportIssue
 from .pipeline.cluster import attach_and_dedupe
+from .pipeline.glance_titles import glance_title, is_sensible_product
 from .pipeline.product_identity import simplify_food_item
 from .pipeline.spikes import score_caers_spike, summarize_caers_spike
 from .seed import ISSUES, seed
@@ -35,8 +36,8 @@ CITIES = ["Atlanta", "Chicago", "Austin", "Boston", "Seattle", "Marietta", "Deca
 FOOD_WATCHLIST = [
     {
         "slug": "romaine-lettuce-cyclospora-watch",
-        "brand": "Romaine / leafy greens",
-        "name": "Romaine and garden salad mixes",
+        "brand": "Salad mixes",
+        "name": "Romaine salad mix",
         "summary": "Online reports of stomach illness tied to bagged romaine and salad mixes — watching before any official notice.",
         "issue": "cyclospora",
         "templates": [
@@ -52,7 +53,7 @@ FOOD_WATCHLIST = [
     },
     {
         "slug": "cantaloupe-salmonella-watch",
-        "brand": "Whole / cut cantaloupe",
+        "brand": "Produce",
         "name": "Cantaloupe",
         "summary": "Cluster of salmonella-like illness posts around cantaloupe before regulators weigh in.",
         "issue": "salmonella",
@@ -67,8 +68,8 @@ FOOD_WATCHLIST = [
     },
     {
         "slug": "deli-meat-listeria-watch",
-        "brand": "Prepackaged deli meats",
-        "name": "Turkey and ham deli slices",
+        "brand": "Deli meat",
+        "name": "Turkey and ham slices",
         "summary": "Parents and caregivers posting about deli meat concerns while waiting on official guidance.",
         "issue": "listeria",
         "templates": [
@@ -94,8 +95,8 @@ FOOD_WATCHLIST = [
     },
     {
         "slug": "soft-cheese-listeria-watch",
-        "brand": "Soft cheeses",
-        "name": "Soft / queso-style cheeses",
+        "brand": "Dairy",
+        "name": "Soft cheese",
         "summary": "Community flags around soft cheese before formal recall language shows up.",
         "issue": "listeria",
         "templates": [
@@ -108,8 +109,8 @@ FOOD_WATCHLIST = [
     # Speculative emerging watches — aim for online chatter without an FDA page yet.
     {
         "slug": "protein-powder-stomach-watch",
-        "brand": "Protein powders / shakes",
-        "name": "Protein powder and ready-to-drink shakes",
+        "brand": "Supplements",
+        "name": "Protein powder",
         "summary": "People posting GI illness after the same protein powders — watching before any official notice.",
         "issue": "food-contamination",
         "templates": [
@@ -122,8 +123,8 @@ FOOD_WATCHLIST = [
     },
     {
         "slug": "meal-kit-chicken-illness-watch",
-        "brand": "Meal-kit chicken",
-        "name": "Meal-kit / prepared chicken dishes",
+        "brand": "Meal kits",
+        "name": "Prepared chicken",
         "summary": "Neighbor notes about meal-kit chicken illness clusters before regulators weigh in.",
         "issue": "salmonella",
         "templates": [
@@ -159,7 +160,7 @@ def ensure_issue_taxonomy(db: Session) -> None:
 
 
 def bootstrap_catalog(db: Session) -> list[Product]:
-    """Build an internet-first food watchlist, then overlay matching FDA recalls."""
+    """Official overlays + evidence-backed community discovery. No invented watchlist illness."""
     settings = get_settings()
     ensure_issue_taxonomy(db)
     purged = purge_placeholder_reports(db)
@@ -172,37 +173,17 @@ def bootstrap_catalog(db: Session) -> list[Product]:
         seed_if_empty(db)
         return db.query(Product).all()
 
-    watch_existing = (
-        db.query(Product)
-        .filter(Product.slug.in_([item["slug"] for item in FOOD_WATCHLIST]))
-        .count()
-    )
-    if not watch_existing:
-        if db.query(Product).count():
-            logger.info("Rebuilding catalog around emerging food watchlist…")
-            _clear_catalog(db)
-        logger.info("Seeding food watchlist (internet-first)…")
-        for item in FOOD_WATCHLIST:
-            _seed_watch_product(db, item)
-        db.commit()
-    else:
-        # Seed any newly added watchlist slugs without wiping the catalog.
-        for item in FOOD_WATCHLIST:
-            if db.query(Product).filter(Product.slug == item["slug"]).one_or_none():
-                continue
-            logger.info("Seeding new watch product %s", item["slug"])
-            _seed_watch_product(db, item)
-        db.commit()
-
+    # Do NOT seed FOOD_WATCHLIST template illness reports — those were fake.
+    # Wipe any leftover invented community rows, then quality-scrub.
+    purge_fake_community_data(db)
     purge_agency_internet_reports(db)
-
-    # Short grocery-style titles for anything already in SQLite.
-    polish_catalog_titles(db)
+    scrub_catalog_quality(db)
     db.commit()
 
-    # Official + CAERS overlays refresh in the background so API startup stays fast.
+    # Official + CAERS + real community web refresh in the background.
     start_official_overlays_background()
     start_caers_refresh_background()
+    start_community_seed_background()
 
     home = (
         db.query(Product)
@@ -211,9 +192,137 @@ def bootstrap_catalog(db: Session) -> list[Product]:
         .limit(settings.home_scrape_products)
         .all()
     )
-    if settings.seed_fake_posts:
+    # seed_fake_posts remains available but defaults off — never invent neighbor posts.
+    if settings.seed_fake_posts and home:
         seed_fake_posts(db, home)
     return home
+
+
+def purge_fake_community_data(db: Session) -> dict:
+    """
+    Remove invented watchlist reports (null URL community), fake city seeds,
+    and ancient / undated web evidence outside the recency window.
+    """
+    from .models import Embedding
+    from .pipeline.evidence_schema import text_has_ancient_year, within_recency
+
+    settings = get_settings()
+    removed_reports = 0
+    removed_posts = 0
+
+    doomed_reports = (
+        db.query(Report)
+        .filter(
+            Report.is_user_generated.is_(True),
+            Report.source.in_(["community", "user_report"]),
+            Report.source_url.is_(None),
+        )
+        .all()
+    )
+    # Also drop web/reddit rows that are ancient or lack observed date + look stale.
+    for report in db.query(Report).filter(Report.is_user_generated.is_(False)).all():
+        if report.source in {"caers", "fda_outbreak", "fda", "fsis"}:
+            continue
+        blob = f"{report.title or ''} {report.text or ''} {report.source_url or ''}"
+        if text_has_ancient_year(blob):
+            doomed_reports.append(report)
+            continue
+        if report.source_url and report.incident_date and not within_recency(report.incident_date):
+            doomed_reports.append(report)
+            continue
+        # URL-less non-user internet rows should not exist.
+        if not report.source_url and report.source in {"web", "reddit", "news", "iwaspoisoned"}:
+            doomed_reports.append(report)
+
+    # Restaurant iWasPoisoned pages are never valid community evidence.
+    from .pipeline.evidence_schema import is_allowed_iwaspoisoned_url
+
+    for report in db.query(Report).filter(Report.source_url.isnot(None)).all():
+        url = report.source_url or ""
+        if "iwaspoisoned.com" not in url.lower():
+            continue
+        if not is_allowed_iwaspoisoned_url(
+            url, title=report.title or "", snippet=report.excerpt or report.text or ""
+        ):
+            doomed_reports.append(report)
+
+    seen_ids: set[int] = set()
+    for report in doomed_reports:
+        if report.id in seen_ids:
+            continue
+        seen_ids.add(report.id)
+        _hard_delete_report(db, report)
+        removed_reports += 1
+
+    # Fake seed posts (generic templates without a linked report).
+    fake_bodies = (
+        "Watching this page for any real links",
+        "Still no shelf tag at my store",
+        "Glad early chatter is collected",
+        "Official notice may catch up later",
+        "people are linking",
+    )
+    for post in db.query(Post).all():
+        body = post.body or ""
+        if any(bit in body for bit in fake_bodies) and not post.report_id:
+            comments = db.query(Comment).filter(Comment.post_id == post.id).all()
+            for c in comments:
+                db.delete(c)
+            likes = db.query(Like).filter(Like.post_id == post.id).all()
+            for like in likes:
+                db.delete(like)
+            db.delete(post)
+            removed_posts += 1
+
+    # Orphan watchlist products with no official/CAERS/URL evidence.
+    watch_slugs = {item["slug"] for item in FOOD_WATCHLIST}
+    deleted_products = 0
+    for product in db.query(Product).filter(Product.slug.in_(watch_slugs)).all():
+        has_recall = db.query(Recall).filter(Recall.product_id == product.id).count() > 0
+        url_reports = (
+            db.query(Report)
+            .filter(Report.product_id == product.id, Report.source_url.isnot(None))
+            .count()
+        )
+        if has_recall or url_reports:
+            continue
+        _hard_delete_product(db, product)
+        deleted_products += 1
+
+    if removed_reports or removed_posts or deleted_products:
+        logger.info(
+            "Purged fake community: reports=%s posts=%s products=%s",
+            removed_reports,
+            removed_posts,
+            deleted_products,
+        )
+    return {
+        "reports": removed_reports,
+        "posts": removed_posts,
+        "products": deleted_products,
+        "recency_days": settings.discovery_recency_days,
+    }
+
+
+def _hard_delete_report(db: Session, report: Report) -> None:
+    from .models import Embedding
+
+    db.query(Report).filter(Report.duplicate_of_id == report.id).update(
+        {Report.duplicate_of_id: None}, synchronize_session=False
+    )
+    db.query(Post).filter(Post.report_id == report.id).update(
+        {Post.report_id: None}, synchronize_session=False
+    )
+    try:
+        db.query(Embedding).filter(Embedding.report_id == report.id).delete(
+            synchronize_session=False
+        )
+    except Exception:
+        pass
+    db.query(ReportIssue).filter(ReportIssue.report_id == report.id).delete(
+        synchronize_session=False
+    )
+    db.delete(report)
 
 
 def purge_placeholder_reports(db: Session) -> int:
@@ -281,6 +390,10 @@ bootstrap_from_cpsc = bootstrap_catalog
 
 
 def _seed_watch_product(db: Session, item: dict) -> Product:
+    """Create a product shell only — never invent illness reports or cities."""
+    existing = db.query(Product).filter(Product.slug == item["slug"]).one_or_none()
+    if existing:
+        return existing
     product = Product(
         slug=item["slug"],
         brand=item["brand"],
@@ -290,35 +403,6 @@ def _seed_watch_product(db: Session, item: dict) -> Product:
     )
     db.add(product)
     db.flush()
-
-    issue = db.query(Issue).filter(Issue.slug == item["issue"]).one_or_none()
-    now = datetime.utcnow()
-    names = ["alex.r", "sam", "jordan.k", "riley", "casey", "maya", "devon", "harper"]
-    # Site-only seed reports — internet evidence comes from live Exa/Brave ingest.
-    for index, text in enumerate(item["templates"]):
-        created = now - timedelta(days=(index % 5), hours=3 * index)
-        report = Report(
-            product_id=product.id,
-            source="community",
-            source_id=f"watch-{item['slug']}-{index}",
-            source_url=None,
-            title=None,
-            text=text,
-            excerpt=text[:220],
-            created_at=created,
-            is_user_generated=True,
-            display_name=names[index % len(names)],
-            location_label=CITIES[index % len(CITIES)],
-            location_precision="city",
-            location_source="inferred",
-            latitude=None,
-            longitude=None,
-        )
-        db.add(report)
-        db.flush()
-        if issue:
-            db.add(ReportIssue(report_id=report.id, issue_id=issue.id, confidence=0.8))
-        attach_and_dedupe(db, report)
     return product
 
 def _overlay_fda_recalls(db: Session, limit: int = 25) -> None:
@@ -505,6 +589,700 @@ def start_caers_refresh_background() -> None:
     threading.Thread(target=worker, name="caers-refresh", daemon=True).start()
 
 
+    threading.Thread(target=worker, name="caers-refresh", daemon=True).start()
+
+
+def start_community_seed_background() -> None:
+    """Pull recent iWasPoisoned / Reddit illness pages into unofficial (URL + date required)."""
+
+    def worker() -> None:
+        with SessionLocal() as db:
+            try:
+                result = seed_community_from_web(db)
+                db.commit()
+                logger.info("Community web seed complete: %s", result)
+            except Exception:
+                logger.exception("Background community seed failed")
+                db.rollback()
+
+    threading.Thread(target=worker, name="community-seed", daemon=True).start()
+
+
+def _strip_headline_excerpt(text: str) -> str:
+    """Drop a news-style first line so quotes read as report body, not headlines."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if len(lines) > 1 and (
+        re.search(r"\b(illness|poisoning|causes?|report)\b", lines[0], re.I)
+        or " - " in lines[0]
+    ):
+        return " ".join(lines[1:])
+    # Single-line: strip leading chrome phrase
+    cleaned = re.sub(
+        r"^[^.]{0,80}\b(illness|poisoning|causes?\s+illness)\b[^.]*\.\s*",
+        "",
+        text or "",
+        flags=re.I,
+    )
+    return cleaned.strip() or (text or "")
+
+
+def seed_community_from_web(db: Session) -> dict:
+    """
+    Fixed query pack → triage → CommunityEvidence gate → upsert products/reports.
+    Honest empty if no search keys or nothing recent validates.
+    """
+    from .agents.page_fetch_agent import fetch_candidates
+    from .agents.triage_agent import should_ingest_as_internet_evidence, triage_complaint
+    from .agents.geo_agent import correlate_location
+    from .data_sources.page_fetch import domain_of
+    from .data_sources.web_search import available_provider, search_web
+    from .pipeline.evidence_schema import (
+        parse_observed_at,
+        source_label_for_url,
+        validate_community_evidence,
+    )
+    from .pipeline.cluster import attach_and_dedupe
+
+    settings = get_settings()
+    provider = available_provider()
+    if not provider:
+        return {"ingested": 0, "skipped": "no_search_key"}
+
+    days = settings.discovery_recency_days
+    year = datetime.utcnow().year
+    # Cast a wide net across ~90d of grocery illness reports, then connect
+    # specific product · brand dots (never collapse into "Grocery foods").
+    stores = "(Costco OR Walmart OR Kroger OR Aldi OR Publix OR Target OR Safeway OR \"Trader Joe\" OR \"Whole Foods\" OR \"Giant Eagle\" OR Meijer OR H-E-B OR Wegmans)"
+    foods = (
+        "(chicken OR turkey OR salad OR sandwich OR wings OR hummus OR chips OR mango OR "
+        "burger OR bake OR deli OR romaine OR yogurt OR \"ice cream\" OR cheese OR milk OR "
+        "sushi OR pizza OR soup OR produce OR fruit OR meat OR seafood OR cookie OR hotdog)"
+    )
+    queries = [
+        f"site:iwaspoisoned.com/incident {stores} {foods} {year}",
+        f"site:iwaspoisoned.com/incident {stores} (illness OR poisoning OR sick OR vomiting OR diarrhea) {year}",
+        f"site:iwaspoisoned.com/industry/grocery_or_supermarket (sick OR vomiting OR diarrhea) {year}",
+        f"site:iwaspoisoned.com/incident Costco (chicken OR salad OR sandwich OR bake OR hummus OR meal) {year}",
+        f"site:iwaspoisoned.com/incident Walmart (chicken OR salad OR wings OR \"ice cream\" OR deli) {year}",
+        f"site:iwaspoisoned.com/incident Kroger (salad OR deli OR chicken OR produce OR dairy) {year}",
+        f"site:iwaspoisoned.com/incident (Aldi OR Publix OR Target) (illness OR sick OR poisoning) {year}",
+        f"site:iwaspoisoned.com/incident (\"Trader Joe\" OR Safeway OR Meijer OR Wegmans) (illness OR sick) {year}",
+        f'site:reddit.com/r/foodpoisoning {stores} (sick OR vomiting OR diarrhea) {year}',
+        f'site:reddit.com ("food poisoning" OR "got sick" OR "foodborne") {stores} {year}',
+        f'site:reddit.com/r/Costco (sick OR vomiting OR "food poisoning" OR diarrhea) {year}',
+        f'site:reddit.com/r/walmart (sick OR vomiting OR "food poisoning") (food OR deli OR chicken) {year}',
+        f"site:iwaspoisoned.com/incident (romaine OR cantaloupe OR spinach OR sprouts) {stores} {year}",
+        f"site:iwaspoisoned.com/incident (yogurt OR cheese OR milk OR \"ice cream\") {stores} {year}",
+        f'{stores} {foods} ("food poisoning" OR "got sick") site:reddit.com {year}',
+        f"site:iwaspoisoned.com/incident (sushi OR seafood OR shrimp OR salmon) {stores} {year}",
+        f"site:iwaspoisoned.com/tag/Costco OR site:iwaspoisoned.com/tag/Walmart {year}",
+        f"site:iwaspoisoned.com/incident (Kirkland OR \"Great Value\" OR SimpleTruth) (illness OR sick) {year}",
+        f'after:{(datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")} {stores} "food poisoning" grocery',
+        f'site:iwaspoisoned.com/incident {stores} after:{(datetime.utcnow() - timedelta(days=min(days, 92))).strftime("%Y-%m-01")}',
+    ][: max(1, settings.community_seed_queries)]
+
+    per_q = max(3, getattr(settings, "community_seed_per_query", 8))
+    hits = search_web(queries, limit_per_query=per_q) or []
+    provider = (hits[0].provider if hits else provider) or provider
+    if not hits:
+        db.add(
+            DiscoveryRun(
+                product_id=None,
+                query=" | ".join(queries)[:900],
+                provider=f"cseed:{provider}"[:40],
+                result_count=0,
+                notes="no hits",
+            )
+        )
+        return {"ingested": 0, "provider": provider, "hits": 0}
+
+    from .pipeline.evidence_schema import is_allowed_iwaspoisoned_url
+
+    def skip_url(url: str) -> bool:
+        host = domain_of(url or "")
+        if any(host.endswith(h) or host == h for h in ("fda.gov", "cdc.gov", "fsis.usda.gov", "usda.gov")):
+            return True
+        # Drop restaurant iWasPoisoned pages even if Exa returned them.
+        if "iwaspoisoned.com" in (url or "").lower() and not is_allowed_iwaspoisoned_url(url):
+            return True
+        return False
+
+    pages = fetch_candidates(
+        hits,
+        limit=settings.community_seed_pages,
+        skip_url=skip_url,
+        rank_url=lambda u: 0 if "iwaspoisoned" in (u or "") or "reddit.com" in (u or "") else 2,
+        is_ingestible=lambda u: bool(u and u.startswith("http")),
+        is_agency=skip_url,
+    )
+
+    # If page fetch fails (common for some hosts), fall back to Exa title+snippet
+    # only when a publish date is available — still fail-closed on observed_at.
+    candidates: list[dict] = list(pages)
+    fetched_urls = {(p.get("final_url") or "").split("#")[0].rstrip("/") for p in pages}
+    if len(candidates) < settings.community_seed_pages:
+        for hit in hits:
+            url = (getattr(hit, "url", None) or "").split("#")[0].rstrip("/")
+            if not url or url in fetched_urls or skip_url(url):
+                continue
+            if "iwaspoisoned.com" in url.lower() and not is_allowed_iwaspoisoned_url(
+                url, title=hit.title or "", snippet=hit.snippet or ""
+            ):
+                continue
+            if not getattr(hit, "published_date", None) and not parse_observed_at(
+                text=f"{hit.title}\n{hit.snippet}", url=url
+            ):
+                continue
+            candidates.append(
+                {
+                    "final_url": url,
+                    "url": url,
+                    "text": f"{hit.title}\n{hit.snippet}",
+                    "title": hit.title,
+                    "snippet": hit.snippet,
+                    "published_date": getattr(hit, "published_date", None),
+                    "host": domain_of(url),
+                }
+            )
+            if len(candidates) >= settings.community_seed_pages:
+                break
+
+    ingested = 0
+    rejected = 0
+    for item in candidates:
+        url = item.get("final_url") or item.get("url") or ""
+        text = item.get("text") or ""
+        title = item.get("title") or ""
+        verdict = triage_complaint(
+            text=text,
+            title=title,
+            product_hint=title,
+            url=url,
+            has_official_recall=False,
+            recency_days=days,
+        )
+        host = (item.get("host") or "").lower()
+        # iWasPoisoned grocery report / incident pages are first-person by site design.
+        if (
+            "iwaspoisoned.com" in host
+            and (
+                "/report" in (url or "").lower()
+                or "/incident" in (url or "").lower()
+                or "grocery_or_supermarket" in (url or "").lower()
+            )
+            and verdict.get("label") in {"uncertain", "noise", "first_person_complaint"}
+            and not verdict.get("stale")
+        ):
+            verdict = {
+                **verdict,
+                "label": "first_person_complaint",
+                "score": max(float(verdict.get("score") or 0), 0.55),
+                "reason": "iWasPoisoned grocery page + recent publish date",
+                "method": "host-heuristic",
+            }
+        if not should_ingest_as_internet_evidence(verdict, has_official_recall=False):
+            rejected += 1
+            continue
+
+        published = item.get("published_date") or item.get("published")
+        observed = parse_observed_at(text=f"{title}\n{text}", url=url, published=published)
+        if not observed:
+            rejected += 1
+            continue
+
+        from .pipeline.evidence_schema import split_grocery_identity
+
+        raw_name = title or text.split("\n")[0][:120]
+        brand_guess, name_guess = split_grocery_identity(raw_name)
+        # Prefer a quote body without the news-headline first line.
+        raw_excerpt = _strip_headline_excerpt(item.get("snippet") or text)[:500]
+        evidence, reason = validate_community_evidence(
+            {
+                "source_url": url,
+                "excerpt": raw_excerpt if len(raw_excerpt) >= 24 else (item.get("snippet") or text)[:500],
+                "brand": brand_guess,
+                "name": name_guess,
+                "observed_at": observed,
+                "triage_label": "first_person_complaint",
+                "confidence": float(verdict.get("score") or 0.5),
+                "confidence_method": verdict.get("method")
+                if verdict.get("method") in {"heuristic", "gemini"}
+                else "heuristic",
+                "location_label": None,
+            }
+        )
+        if not evidence:
+            rejected += 1
+            logger.debug("community seed reject %s: %s", url[:80], reason)
+            continue
+
+        # Shelf identity: general product name FIRST, then company brand.
+        product_name = evidence.name
+        product_brand = evidence.brand if evidence.brand not in {"", "Unknown"} else brand_guess
+        if not product_name or len(product_name) < 3:
+            rejected += 1
+            continue
+
+        geo = correlate_location(text, title)
+        loc = geo.get("location_label") if geo.get("location_source") == "inferred" else None
+        # Only keep location if the label literally appears in the page text.
+        if loc and loc.lower() not in f"{title} {text}".lower():
+            loc = None
+
+        product = _find_or_create_community_product(
+            db, name=product_name, brand=product_brand or "Unknown"
+        )
+
+        url_key = url.split("#")[0].rstrip("/")[:240]
+        exists = (
+            db.query(Report)
+            .filter(Report.product_id == product.id, Report.source_id == url_key)
+            .first()
+        )
+        if exists:
+            continue
+
+        report = Report(
+            product_id=product.id,
+            source=source_label_for_url(url),
+            source_id=url_key,
+            source_url=str(evidence.source_url)[:700],
+            title=title[:200] if title else None,
+            text=text[:4000],
+            excerpt=evidence.excerpt[:220],
+            created_at=datetime.utcnow(),
+            incident_date=evidence.observed_at,
+            is_user_generated=False,
+            location_label=loc,
+            location_precision="city" if loc else "none",
+            location_source="inferred" if loc else "none",
+            latitude=None,
+            longitude=None,
+            extra_json=f'{{"confidence":{evidence.confidence},"method":"{evidence.confidence_method}"}}',
+        )
+        db.add(report)
+        db.flush()
+        attach_and_dedupe(db, report)
+        ingested += 1
+
+    # Connect dots: merge only near-identical product · brand stems (keep specifics).
+    enriched = _enrich_community_products(db, skip_url=skip_url, days=days)
+    ingested += enriched
+    merged = _merge_near_duplicate_community(db)
+    merged += _cluster_specific_patterns(db)
+    _refresh_pattern_summaries(db)
+
+    db.add(
+        DiscoveryRun(
+            product_id=None,
+            query=" | ".join(queries)[:900],
+            provider=f"cseed:{provider}"[:40],
+            result_count=len(hits),
+            notes=(
+                f"ingested={ingested} rejected={rejected} pages={len(pages)} "
+                f"candidates={len(candidates)} enriched={enriched} merged={merged}"
+            )[:1000],
+        )
+    )
+    return {
+        "ingested": ingested,
+        "rejected": rejected,
+        "hits": len(hits),
+        "pages": len(pages),
+        "candidates": len(candidates),
+        "enriched": enriched,
+        "merged": merged,
+        "provider": provider,
+    }
+
+
+def _norm_key(name: str, brand: str) -> str:
+    titled = glance_title(brand=brand, name=name)
+    if titled:
+        name, brand = titled["name"], titled["brand"] or brand
+    blob = re.sub(r"[^a-z0-9]+", " ", f"{name} {brand}".lower()).strip()
+    return re.sub(r"\s+", " ", blob)
+
+
+def _product_stem(name: str) -> str:
+    """Specific product identity tokens — used to connect the same item across cities."""
+    stop = {
+        "the", "and", "for", "with", "from", "foods", "food", "item", "what",
+        "grocery", "supermarket", "prepared", "store", "organic", "fresh",
+        "unsweetened", "dried", "dry", "frozen", "raw",
+    }
+    tokens = [
+        t for t in re.findall(r"[a-z0-9]+", (name or "").lower())
+        if len(t) > 2 and t not in stop
+    ]
+    return " ".join(tokens)
+
+
+def _stems_match(a: str, b: str) -> bool:
+    """True when two product names are the same specific item (not just same food family)."""
+    sa, sb = _product_stem(a), _product_stem(b)
+    if not sa or not sb:
+        return False
+    if sa == sb:
+        return True
+    ta, tb = set(sa.split()), set(sb.split())
+    if not ta or not tb:
+        return False
+    # Require high overlap — "chicken bake" ≠ "chicken wings".
+    inter = len(ta & tb)
+    return inter == len(ta) or inter == len(tb) or (inter / max(len(ta), len(tb)) >= 0.8 and inter >= 2)
+
+
+def _find_or_create_community_product(db: Session, *, name: str, brand: str) -> Product:
+    """Reuse an existing community product with the same specific shelf identity."""
+    titled = glance_title(brand=brand, name=name)
+    if titled:
+        name = titled["name"]
+        brand = titled["brand"] or brand or "Unknown"
+    # Reject ultra-generic bucket leftovers from older seeds.
+    if re.match(
+        r"^(grocery foods?|prepared foods?|produce|snacks?|dairy|meat.*poultry)$",
+        name or "",
+        re.I,
+    ):
+        name = name  # still createable only if glance already rejected; keep as-is for cleanup later
+
+    key = _norm_key(name, brand)
+    slug_base = re.sub(r"[^a-z0-9]+", "-", f"{name}-{brand}".lower()).strip("-")[:80]
+    slug = f"web-{slug_base or 'community-food'}"[:160]
+    product = db.query(Product).filter(Product.slug == slug).first()
+    if product:
+        product.name = name[:180]
+        product.brand = (brand or "Unknown")[:120]
+        return product
+    brand_l = (brand or "").lower().strip()
+    for cand in (
+        db.query(Product)
+        .filter(Product.category == "Food", Product.slug.like("web-%"))
+        .order_by(Product.id.desc())
+        .limit(120)
+        .all()
+    ):
+        if _norm_key(cand.name or "", cand.brand or "") == key:
+            cand.name = name[:180]
+            cand.brand = (brand or cand.brand or "Unknown")[:120]
+            return cand
+        # Same brand + same specific product stem (across different cities/URLs).
+        if brand_l and (cand.brand or "").lower().strip() == brand_l and _stems_match(cand.name or "", name):
+            return cand
+    product = Product(
+        slug=slug,
+        brand=(brand or "Unknown")[:120],
+        name=name[:180],
+        category="Food",
+        summary="Open-web pattern: linked grocery illness reports for this product.",
+    )
+    db.add(product)
+    db.flush()
+    return product
+
+
+def _merge_near_duplicate_community(db: Session) -> int:
+    """Move reports onto a canonical product when brand+name keys collide."""
+    products = (
+        db.query(Product)
+        .filter(Product.category == "Food", Product.slug.like("web-%"))
+        .order_by(Product.id.asc())
+        .all()
+    )
+    by_key: dict[str, Product] = {}
+    moved = 0
+    for product in products:
+        key = _norm_key(product.name or "", product.brand or "")
+        if not key:
+            continue
+        if key not in by_key:
+            by_key[key] = product
+            continue
+        keep = by_key[key]
+        if keep.id == product.id:
+            continue
+        reports = db.query(Report).filter(Report.product_id == product.id).all()
+        for report in reports:
+            report.product_id = keep.id
+            moved += 1
+        db.flush()
+        _hard_delete_product(db, product)
+    if moved:
+        db.flush()
+    return moved
+
+
+def _cluster_specific_patterns(db: Session) -> int:
+    """
+    Connect dots: merge reports that name the same specific product · brand
+    (e.g. Chicken Bake · Costco in Eugene + Glendale). Never collapse into
+    generic buckets like 'Prepared foods' or 'Grocery foods'.
+    """
+    products = (
+        db.query(Product)
+        .filter(Product.category == "Food", Product.slug.like("web-%"))
+        .order_by(Product.id.asc())
+        .all()
+    )
+    # Drop legacy ultra-generic shells first.
+    generic = re.compile(
+        r"^(grocery foods?|prepared foods?|produce|snacks?|dairy|meat\s*&\s*poultry|grocery item)$",
+        re.I,
+    )
+    for product in list(products):
+        if generic.match((product.name or "").strip()):
+            # Re-home reports onto specific products parsed from each report title.
+            for report in db.query(Report).filter(Report.product_id == product.id).all():
+                from .pipeline.evidence_schema import split_grocery_identity
+
+                brand_g, name_g = split_grocery_identity(
+                    report.title or report.excerpt or product.name
+                )
+                if not name_g or generic.match(name_g.strip()):
+                    continue
+                target = _find_or_create_community_product(
+                    db, name=name_g, brand=brand_g or product.brand or "Unknown"
+                )
+                if target.id == product.id:
+                    continue
+                url_key = (report.source_id or report.source_url or "")[:240]
+                exists = (
+                    db.query(Report)
+                    .filter(Report.product_id == target.id, Report.source_id == url_key)
+                    .first()
+                    if url_key
+                    else None
+                )
+                if exists:
+                    _hard_delete_report(db, report)
+                else:
+                    report.product_id = target.id
+            db.flush()
+            left = db.query(Report).filter(Report.product_id == product.id).count()
+            if left == 0:
+                _hard_delete_product(db, product)
+    db.flush()
+
+    products = (
+        db.query(Product)
+        .filter(Product.category == "Food", Product.slug.like("web-%"))
+        .order_by(Product.id.asc())
+        .all()
+    )
+    groups: dict[tuple[str, str], list[Product]] = {}
+    for product in products:
+        brand = (product.brand or "").lower().strip()
+        stem = _product_stem(product.name or "")
+        if not brand or brand == "unknown" or not stem:
+            continue
+        if generic.match((product.name or "").strip()):
+            continue
+        groups.setdefault((brand, stem), []).append(product)
+
+    moved = 0
+    for (_brand, _stem), members in groups.items():
+        if len(members) < 2:
+            continue
+        # Prefer the most specific (longest) shelf name with the most URLs.
+        members.sort(
+            key=lambda p: (
+                -db.query(Report).filter(Report.product_id == p.id, Report.source_url.isnot(None)).count(),
+                -len(p.name or ""),
+                p.id,
+            )
+        )
+        keep = members[0]
+        for other in members[1:]:
+            for report in db.query(Report).filter(Report.product_id == other.id).all():
+                url_key = (report.source_id or report.source_url or "")[:240]
+                exists = (
+                    db.query(Report)
+                    .filter(Report.product_id == keep.id, Report.source_id == url_key)
+                    .first()
+                    if url_key
+                    else None
+                )
+                if exists:
+                    _hard_delete_report(db, report)
+                else:
+                    report.product_id = keep.id
+                    moved += 1
+            db.flush()
+            _hard_delete_product(db, other)
+    if moved:
+        db.flush()
+    return moved
+
+
+def _refresh_pattern_summaries(db: Session) -> None:
+    """Write glanceable pattern blurbs: N linked reports · M places."""
+    for product in (
+        db.query(Product)
+        .filter(Product.category == "Food", Product.slug.like("web-%"))
+        .all()
+    ):
+        reports = (
+            db.query(Report)
+            .filter(Report.product_id == product.id, Report.source_url.isnot(None))
+            .all()
+        )
+        if not reports:
+            continue
+        places = {
+            (r.location_label or "").strip()
+            for r in reports
+            if (r.location_label or "").strip()
+        }
+        n = len({(r.source_url or "").split("#")[0].rstrip("/") for r in reports if r.source_url})
+        report_word = "report" if n == 1 else "reports"
+        if places:
+            place_word = "place" if len(places) == 1 else "places"
+            product.summary = (
+                f"Open-web pattern: {n} linked {report_word}"
+                f" across {len(places)} {place_word}."
+            )
+        else:
+            product.summary = f"Open-web pattern: {n} linked grocery illness {report_word}."
+
+
+def _enrich_community_products(db: Session, *, skip_url, days: int) -> int:
+    """Find additional linked sources so no community card rests on a single URL."""
+    from .agents.triage_agent import should_ingest_as_internet_evidence, triage_complaint
+    from .agents.geo_agent import correlate_location
+    from .data_sources.web_search import search_web
+    from .pipeline.evidence_schema import (
+        is_allowed_iwaspoisoned_url,
+        parse_observed_at,
+        source_label_for_url,
+        split_grocery_identity,
+        validate_community_evidence,
+    )
+    from .pipeline.cluster import attach_and_dedupe
+    from .data_sources.page_fetch import domain_of
+
+    settings = get_settings()
+    min_urls = max(2, settings.community_min_url_reports)
+    added = 0
+    web_products = (
+        db.query(Product)
+        .filter(Product.category == "Food", Product.slug.like("web-%"))
+        .order_by(Product.id.desc())
+        .limit(40)
+        .all()
+    )
+    for product in web_products:
+        urls = {
+            (r.source_url or "").split("#")[0].rstrip("/")
+            for r in db.query(Report).filter(Report.product_id == product.id).all()
+            if r.source_url
+        }
+        if len(urls) >= min_urls:
+            continue
+        label = f"{product.name} {product.brand}".strip()
+        year = datetime.utcnow().year
+        follow = [
+            f'site:iwaspoisoned.com/incident "{product.name}" {product.brand} {year}',
+            f'site:iwaspoisoned.com/incident {product.brand} "{product.name}" (illness OR poisoning OR sick) {year}',
+            f'site:iwaspoisoned.com/incident {product.brand} {_product_stem(product.name)} (illness OR sick) {year}',
+            f'site:reddit.com "{product.name}" {product.brand} (sick OR vomiting OR "food poisoning") {year}',
+            f'{product.brand} "{product.name}" ("food poisoning" OR "got sick" OR vomiting) -site:fda.gov -site:cdc.gov {year}',
+            f'site:reddit.com {product.brand} {_product_stem(product.name)} (sick OR poisoning) {year}',
+        ]
+        hits = search_web(follow, limit_per_query=6) or []
+        name_l = (product.name or "").lower()
+        brand_l = (product.brand or "").lower()
+        for hit in hits:
+            url = (hit.url or "").split("#")[0].rstrip("/")
+            if not url or url in urls or skip_url(url):
+                continue
+            blob = f"{hit.title or ''}\n{hit.snippet or ''}".lower()
+            # Require the primary food token (not filler words) to appear in the hit.
+            stop = {"the", "and", "for", "with", "from", "foods", "food", "item", "what"}
+            name_tokens = [
+                t
+                for t in re.findall(r"[a-z0-9]+", name_l)
+                if len(t) > 2 and t not in stop
+            ]
+            if not name_tokens:
+                continue
+            if not any(t in blob or t in url.lower() for t in name_tokens):
+                continue
+            if brand_l and brand_l not in {"unknown", ""} and brand_l not in blob and brand_l not in url.lower():
+                continue
+            if "iwaspoisoned.com" in url.lower() and not is_allowed_iwaspoisoned_url(
+                url, title=hit.title or "", snippet=hit.snippet or ""
+            ):
+                continue
+            text = f"{hit.title}\n{hit.snippet}"
+            observed = parse_observed_at(
+                text=text, url=url, published=getattr(hit, "published_date", None)
+            )
+            if not observed:
+                continue
+            verdict = triage_complaint(
+                text=text,
+                title=hit.title,
+                product_hint=label,
+                url=url,
+                has_official_recall=False,
+                recency_days=days,
+            )
+            if "iwaspoisoned.com" in url.lower() and not verdict.get("stale"):
+                verdict = {
+                    **verdict,
+                    "label": "first_person_complaint",
+                    "score": max(float(verdict.get("score") or 0), 0.55),
+                }
+            if not should_ingest_as_internet_evidence(verdict, has_official_recall=False):
+                continue
+            brand_g, name_g = split_grocery_identity(hit.title or product.name)
+            # Prefer the product we're enriching; don't rename mid-enrich.
+            evidence, _reason = validate_community_evidence(
+                {
+                    "source_url": url,
+                    "excerpt": _strip_headline_excerpt(hit.snippet or text)[:500],
+                    "brand": product.brand or brand_g,
+                    "name": product.name or name_g,
+                    "observed_at": observed,
+                    "confidence": float(verdict.get("score") or 0.5),
+                }
+            )
+            if not evidence:
+                continue
+            geo = correlate_location(text, hit.title)
+            loc = geo.get("location_label") if geo.get("location_source") == "inferred" else None
+            if loc and loc.lower() not in text.lower():
+                loc = None
+            url_key = url[:240]
+            if db.query(Report).filter(Report.product_id == product.id, Report.source_id == url_key).first():
+                continue
+            report = Report(
+                product_id=product.id,
+                source=source_label_for_url(url),
+                source_id=url_key,
+                source_url=str(evidence.source_url)[:700],
+                title=(hit.title or "")[:200] or None,
+                text=text[:4000],
+                excerpt=evidence.excerpt[:220],
+                created_at=datetime.utcnow(),
+                incident_date=evidence.observed_at,
+                is_user_generated=False,
+                location_label=loc,
+                location_precision="city" if loc else "none",
+                location_source="inferred" if loc else "none",
+                extra_json=f'{{"confidence":{evidence.confidence},"method":"enrich"}}',
+            )
+            db.add(report)
+            db.flush()
+            attach_and_dedupe(db, report)
+            urls.add(url)
+            added += 1
+            if len(urls) >= min_urls:
+                break
+    return added
+
+
 def _overlay_fsis_recalls(db: Session, limit: int = 25) -> None:
     """Attach active USDA-FSIS recalls as grocery-style product items."""
     settings = get_settings()
@@ -634,18 +1412,16 @@ def polish_catalog_titles(db: Session) -> int:
             Product.category == "Food",
             Product.slug.like("fsis-%")
             | Product.slug.like("outbreak-%")
-            | Product.slug.like("caers-%"),
+            | Product.slug.like("caers-%")
+            | Product.slug.like("search-%"),
         )
         .all()
     )
     for product in products:
-        polished = simplify_food_item(
-            brand=product.brand,
-            name=product.name,
-            fallback="Food item",
-        )
-        brand = polished["brand"]
-        name = polished["name"]
+        titled = glance_title(brand=product.brand, name=product.name)
+        if not titled:
+            continue
+        brand, name = titled["brand"], titled["name"]
         if product.slug.startswith("outbreak-") and brand in {"Unknown", ""}:
             brand = "FDA watch"
         if (product.brand or "") != brand or (product.name or "") != name:
@@ -655,6 +1431,162 @@ def polish_catalog_titles(db: Session) -> int:
     if changed:
         logger.info("Polished %s catalog item titles", changed)
     return changed
+
+
+def scrub_catalog_quality(db: Session) -> dict:
+    """
+    One-shot quality pass:
+    - purge invented community / ancient evidence
+    - purge recalls older than official_recall_max_age_days
+    - delete junk / legalese products (Unidentified food, ineligible import, etc.)
+    - rewrite surviving titles to glanceable form
+    """
+    from .models import Embedding
+
+    settings = get_settings()
+    fake = purge_fake_community_data(db)
+    purged_recalls = purge_non_ongoing_recalls(db)
+
+    doomed: list[Product] = []
+    for product in db.query(Product).filter(Product.category == "Food").all():
+        slug = product.slug or ""
+        source_brand = product.brand
+        source_name = product.name
+
+        # Watchlist shells without URL evidence should be deleted, not protected.
+        if slug in {item["slug"] for item in FOOD_WATCHLIST}:
+            url_n = (
+                db.query(Report)
+                .filter(Report.product_id == product.id, Report.source_url.isnot(None))
+                .count()
+            )
+            has_official = db.query(Recall).filter(Recall.product_id == product.id).count() > 0
+            if not url_n and not has_official:
+                doomed.append(product)
+                continue
+            titled = glance_title(brand=source_brand, name=source_name)
+            if titled:
+                product.brand = titled["brand"][:120]
+                product.name = titled["name"][:180]
+            continue
+        if not is_sensible_product(source_brand, source_name, slug=slug):
+            doomed.append(product)
+            continue
+        titled = glance_title(brand=source_brand, name=source_name)
+        if not titled:
+            doomed.append(product)
+            continue
+        product.brand = titled["brand"][:120]
+        product.name = titled["name"][:180]
+
+    deleted = 0
+    for product in doomed:
+        _hard_delete_product(db, product)
+        deleted += 1
+
+    polish_catalog_titles(db)
+
+    # Collapse exact brand+name duplicates (keep newest recall / highest id).
+    deduped = _dedupe_shelf_products(db)
+
+    logger.info(
+        "Catalog scrub: fake=%s purged_recalls=%s deleted_products=%s deduped=%s",
+        fake,
+        purged_recalls,
+        deleted,
+        deduped,
+    )
+    return {
+        "purged_recalls": purged_recalls,
+        "deleted_products": deleted + deduped,
+        "fake_purged": fake,
+    }
+
+
+def _hard_delete_product(db: Session, product: Product) -> None:
+    """Delete a product and all dependent rows (SQLite FK-safe)."""
+    from .models import Embedding, TimelineEvent, DiscoveryRun
+
+    reports = db.query(Report).filter(Report.product_id == product.id).all()
+    report_ids = [r.id for r in reports]
+    if report_ids:
+        db.query(Report).filter(Report.duplicate_of_id.in_(report_ids)).update(
+            {Report.duplicate_of_id: None}, synchronize_session=False
+        )
+        db.query(Post).filter(Post.report_id.in_(report_ids)).update(
+            {Post.report_id: None}, synchronize_session=False
+        )
+        try:
+            db.query(Embedding).filter(Embedding.report_id.in_(report_ids)).delete(
+                synchronize_session=False
+            )
+        except Exception:
+            pass
+        db.query(ReportIssue).filter(ReportIssue.report_id.in_(report_ids)).delete(
+            synchronize_session=False
+        )
+        for report in reports:
+            db.delete(report)
+
+    posts = db.query(Post).filter(Post.product_id == product.id).all()
+    post_ids = [p.id for p in posts]
+    if post_ids:
+        db.query(Comment).filter(Comment.post_id.in_(post_ids)).delete(synchronize_session=False)
+        db.query(Like).filter(Like.post_id.in_(post_ids)).delete(synchronize_session=False)
+        db.query(Post).filter(Post.id.in_(post_ids)).delete(synchronize_session=False)
+
+    db.query(Recall).filter(Recall.product_id == product.id).delete(synchronize_session=False)
+    try:
+        db.query(TimelineEvent).filter(TimelineEvent.product_id == product.id).delete(
+            synchronize_session=False
+        )
+        db.query(DiscoveryRun).filter(DiscoveryRun.product_id == product.id).delete(
+            synchronize_session=False
+        )
+    except Exception:
+        pass
+    db.delete(product)
+
+
+def _dedupe_shelf_products(db: Session) -> int:
+    """Keep one product per glance brand+name for official/outbreak/caers rows."""
+    from collections import defaultdict
+
+    groups: dict[str, list[Product]] = defaultdict(list)
+    for product in db.query(Product).filter(Product.category == "Food").all():
+        slug = product.slug or ""
+        if not (
+            slug.startswith("fsis-")
+            or slug.startswith("outbreak-")
+            or slug.startswith("caers-")
+            or slug.startswith("search-")
+        ):
+            continue
+        brand = (product.brand or "").strip().lower()
+        name = (product.name or "").strip().lower()
+        name = re.sub(r"^(raw|frozen)\s+", "", name)
+        # Collapse near-identical brands (corte argentino usa vs corte argentino)
+        brand = re.sub(r"\b(usa|llc|inc|co)\b", "", brand)
+        brand = re.sub(r"\s+", " ", brand).strip()
+        key = f"{brand}|{name}"
+        groups[key].append(product)
+
+    removed = 0
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+
+        def score(p: Product) -> tuple:
+            has_recall = db.query(Recall).filter(Recall.product_id == p.id).count() > 0
+            return (1 if has_recall else 0, p.id)
+
+        keep = max(items, key=score)
+        for product in items:
+            if product.id == keep.id:
+                continue
+            _hard_delete_product(db, product)
+            removed += 1
+    return removed
 
 
 def _overlay_caers(db: Session) -> None:
@@ -681,11 +1613,12 @@ def _overlay_caers(db: Session) -> None:
     for key, items in top:
         sample = items[0]
         slug = f"caers-{key}"[:160]
-        polished = simplify_food_item(
+        polished = glance_title(
             brand=sample["brand"],
             name=sample["name"],
-            fallback="Food item",
         )
+        if not polished:
+            continue
         # Skip FOIA / nonsense labels that slipped through.
         if re.search(r"\bexemption\s*4\b", f"{polished['brand']} {polished['name']}", re.I):
             continue
@@ -699,8 +1632,14 @@ def _overlay_caers(db: Session) -> None:
                 summary="FDA CAERS adverse event reports on file — not an official recall.",
             )
             db.add(product)
-            db.flush()
-        else:
+            try:
+                db.flush()
+            except Exception:
+                db.rollback()
+                product = db.query(Product).filter(Product.slug == slug).first()
+                if not product:
+                    continue
+        if product:
             product.brand = polished["brand"][:120]
             product.name = polished["name"][:180]
 
@@ -919,39 +1858,10 @@ def _loose_product_match(product: Product, item: dict) -> bool:
 
 
 def _ensure_pre_recall_reports(db: Session, product: Product, recall_date: datetime) -> None:
-    """Guarantee at least a few site notes dated before the official recall."""
-    pre = (
-        db.query(Report)
-        .filter(Report.product_id == product.id, Report.created_at < recall_date)
-        .count()
-    )
-    if pre >= 3:
-        return
-    issue = db.query(Issue).filter(Issue.slug.in_(("cyclospora", "salmonella", "listeria", "food-contamination"))).first()
-    for i in range(3 - pre):
-        created = recall_date - timedelta(days=10 + i * 2)
-        report = Report(
-            product_id=product.id,
-            source="community",
-            source_id=f"pre-recall-{product.slug}-{i}",
-            source_url=None,
-            text=(
-                "Posting this before any official recall page existed. "
-                "Several independent people described the same illness pattern."
-            ),
-            excerpt="Several independent people described the same illness pattern before any official recall.",
-            created_at=created,
-            is_user_generated=True,
-            display_name=["early.signal", "forum.user", "neighbor"][i % 3],
-            location_label=CITIES[i % len(CITIES)],
-            location_precision="city",
-            location_source="inferred",
-        )
-        db.add(report)
-        db.flush()
-        if issue:
-            db.add(ReportIssue(report_id=report.id, issue_id=issue.id, confidence=0.75))
-        attach_and_dedupe(db, report)
+    """No-op: never invent pre-recall community notes."""
+    del db, product, recall_date
+    return
+
 
 def _clear_catalog(db: Session) -> None:
     from .models import Embedding, TimelineEvent

@@ -124,17 +124,13 @@ def _row_to_dict(cells: list[str], hrefs: list[str]) -> dict | None:
         f"Investigation: {status or 'Active'}."
     )
 
-    from ..pipeline.product_identity import simplify_food_item
-
-    item_name = product
     if re.search(r"not yet identified|not identified|unidentified", product or "", re.I):
-        item_name = "Unidentified food"
-    simplified = simplify_food_item(
-        brand="",
-        name=item_name,
-        fallback="Food item",
-    )
-    # Brand stays light — pathogen is overlay context, not the grocery title.
+        return None
+    from ..pipeline.glance_titles import glance_title, is_sensible_product
+
+    simplified = glance_title(brand="", name=product)
+    if not simplified or not is_sensible_product(simplified["brand"], simplified["name"]):
+        return None
     brand = "FDA watch"
     name = simplified["name"]
 

@@ -4,6 +4,7 @@ from .security import iso, public_location
 
 def product_card(product: Product, signal: dict, local: bool = False) -> dict:
     tags = _tags(signal, local)
+    evidence = _evidence_links(product, signal)
     return {
         "id": product.id,
         "slug": product.slug,
@@ -19,7 +20,47 @@ def product_card(product: Product, signal: dict, local: bool = False) -> dict:
         "local": local,
         "tags": tags,
         "source_tier": signal.get("source_tier") or "unofficial",
+        "evidence_count": len(evidence),
+        "evidence": evidence,
     }
+
+
+def _evidence_links(product: Product, signal: dict) -> list[dict]:
+    """Linked public URLs for the card — never invent."""
+    reports = getattr(product, "reports", None)
+    if reports is None:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for report in reports:
+        url = (report.source_url or "").strip()
+        if not url or url in seen:
+            continue
+        if report.is_duplicate:
+            continue
+        seen.add(url)
+        out.append(
+            {
+                "source_url": url,
+                "source": report.source,
+                "observed_at": iso(report.incident_date) if report.incident_date else None,
+                "excerpt": (report.excerpt or report.text or "")[:180],
+            }
+        )
+    # Official recall URL if present and not already listed
+    recall = signal.get("official_recall") or {}
+    rurl = (recall.get("source_url") or "").strip()
+    if rurl and rurl not in seen:
+        out.insert(
+            0,
+            {
+                "source_url": rurl,
+                "source": recall.get("agency") or "official",
+                "observed_at": recall.get("recall_date"),
+                "excerpt": recall.get("hazard") or "",
+            },
+        )
+    return out[:12]
 
 
 def product_detail(product: Product, signal: dict, reports: list[Report], posts: list[Post]) -> dict:
@@ -51,6 +92,20 @@ def product_detail(product: Product, signal: dict, reports: list[Report], posts:
 
 def report_card(report: Report) -> dict:
     location = public_location(report.location_label, report.latitude, report.longitude)
+    observed = report.incident_date or (None if not report.is_user_generated else report.created_at)
+    conf = None
+    method = None
+    if report.extra_json:
+        try:
+            import json
+
+            meta = json.loads(report.extra_json)
+            conf = meta.get("confidence")
+            method = meta.get("method")
+        except Exception:
+            pass
+    if conf is None and report.issue_links:
+        conf = max((link.confidence for link in report.issue_links), default=None)
     return {
         "id": report.id,
         "source": report.source,
@@ -59,6 +114,10 @@ def report_card(report: Report) -> dict:
         "text": report.text,
         "excerpt": report.excerpt or report.text[:220],
         "created_at": iso(report.created_at),
+        "incident_date": iso(observed) if observed else None,
+        "observed_at": iso(observed) if observed else None,
+        "confidence": conf,
+        "confidence_method": method,
         "location": location,
         "is_user_generated": report.is_user_generated,
         "is_duplicate": report.is_duplicate,
