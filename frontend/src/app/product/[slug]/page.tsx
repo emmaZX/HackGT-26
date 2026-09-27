@@ -13,6 +13,7 @@ import { Community } from "@/components/Community";
 import { Disclaimer } from "@/components/Disclaimer";
 import { POSTED_EVENT } from "@/components/PostModal";
 import { BackArrow } from "@/components/BackArrow";
+import { ProductImage } from "@/components/ProductImage";
 
 function ProductInner() {
   const router = useRouter();
@@ -281,14 +282,11 @@ function ProductInner() {
 
         {/* Right: the product */}
         <aside className="card p-6 md:px-[41px] md:pb-[36px] md:pt-[41px] lg:sticky lg:top-6">
-          <div className="grid aspect-[305/290] place-items-center overflow-hidden rounded-[12px] bg-[#d9d9d9]">
-            {product.image_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={product.image_url} alt={product.name} className="h-full w-full bg-white object-contain" />
-            ) : (
-              <span className="px-6 text-center text-[13px] text-[#8e98ab]">No photo yet</span>
-            )}
-          </div>
+          <ProductImage
+            product={product}
+            recall={official.state === "official_recall"}
+            className="aspect-[305/290] overflow-hidden rounded-[12px]"
+          />
           <div className="mt-6 border-t border-[#e0e3e9] pt-6">
             {pills.length > 0 && (
               <div className="mb-5 flex flex-wrap gap-1">

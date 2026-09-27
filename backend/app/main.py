@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .bootstrap import bootstrap_catalog, start_home_scrape_background
+from .cpsc_sync import start_cpsc_sync_background
+from .image_lookup import start_image_lookup_background
 from .config import get_settings
 from .auth import AuthUser, require_user
 from .database import Base, SessionLocal, engine, ensure_schema, get_db
@@ -34,6 +36,8 @@ with SessionLocal() as session:
     home_slugs = [product.slug for product in home_products]
 
 start_home_scrape_background(home_slugs)
+start_cpsc_sync_background()
+start_image_lookup_background()
 
 app = FastAPI(title="Recall Me Maybe", version="0.1.0", docs_url="/docs")
 app.add_middleware(

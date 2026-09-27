@@ -12,7 +12,10 @@ import { EvidenceList, isInternetReport, isUsableSourceUrl } from "@/components/
 import { POSTED_EVENT } from "@/components/PostModal";
 
 export default function HomePage() {
-  const [city, setCity] = useState<string | null>(() => getCity());
+  // Start as null on both server and client; the saved city is read after mount.
+  // Reading localStorage during render made the server and browser HTML disagree.
+  const [city, setCity] = useState<string | null>(null);
+  const [cityReady, setCityReady] = useState(false);
   const [feed, setFeed] = useState<Feed | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,11 +33,17 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    setCity(getCity());
+    setCityReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!cityReady) return;
     load(city);
     const refresh = () => load(city);
     window.addEventListener(POSTED_EVENT, refresh);
     return () => window.removeEventListener(POSTED_EVENT, refresh);
-  }, [city, load]);
+  }, [city, cityReady, load]);
 
   const onCityChange = useCallback((next: string | null) => {
     setCity(next);
@@ -70,18 +79,23 @@ export default function HomePage() {
       )}
 
       <section aria-labelledby="recent-title" aria-busy={showSkeletons}>
-        <h2 id="recent-title" className="section-title">recent updates</h2>
-        {heroCards.length ? (
-          <RecentCarousel products={heroCards} />
-        ) : showSkeletons ? (
-          <div className="flex gap-[30px] overflow-hidden pb-[18px] pt-[15px]">
-            {Array.from({ length: 5 }, (_, i) => (
-              <div key={i} className="skeleton h-[370px] w-[335px] shrink-0" />
-            ))}
-          </div>
-        ) : (
-          <p className="mb-6 mt-4 text-sm text-[#627290]">No updates yet. Community reports and recent official items fill this section.</p>
-        )}
+        <h2 id="recent-title" className="section-title">Recent updates</h2>
+        {/* Band sits exactly behind the scrolling window */}
+        <div className="mt-4 overflow-hidden bg-[#9DBAD7] py-2">
+          {heroCards.length ? (
+            <RecentCarousel products={heroCards} />
+          ) : showSkeletons ? (
+            <div className="flex gap-[30px] overflow-hidden pb-[18px] pt-[15px]">
+              {Array.from({ length: 5 }, (_, i) => (
+                <div key={i} className="skeleton h-[370px] w-[335px] shrink-0" />
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-8 text-sm text-[#031d4e]">
+              No updates yet. Community reports and recent official items fill this section.
+            </p>
+          )}
+        </div>
       </section>
 
       <TierSection
@@ -113,16 +127,16 @@ export default function HomePage() {
         disclaimer="CAERS reports are largely voluntary and do not prove a product caused harm."
       />
 
-      <div className="mt-4 grid gap-10 lg:grid-cols-[710px_1fr] lg:gap-[53px]">
+      <div className="mt-10 grid gap-10 lg:grid-cols-[710px_1fr] lg:gap-[53px]">
         <section aria-labelledby="area-title">
           <h2 id="area-title" className="section-title">
-            in your area{city ? ` · ${city.toLowerCase()}` : ""}
+            In your area{city ? ` · ${city}` : ""}
           </h2>
           <GeoMap geography={nearbyGeo} city={city} className="mt-[13px] h-[360px] md:h-[465px]" />
         </section>
 
         <section aria-labelledby="use-title">
-          <h2 id="use-title" className="section-title">products you may use</h2>
+          <h2 id="use-title" className="section-title">Products you may use</h2>
           <div className="mt-[23px] grid gap-[17px]">
             {mayUse
               ? mayUse.map((product) => <ProductRow key={product.slug} product={product} />)
@@ -133,7 +147,7 @@ export default function HomePage() {
 
       {feed && (
         <section aria-labelledby="latest-title" className="mt-14">
-          <h2 id="latest-title" className="section-title">latest reports</h2>
+          <h2 id="latest-title" className="section-title">Latest reports</h2>
           <div className="mt-5 max-w-[870px]">
             <EvidenceList
               reports={latest}

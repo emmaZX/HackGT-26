@@ -39,7 +39,7 @@ export function Nav() {
             <Logo />
           </Link>
           <div
-            className="ml-[0.05em] mt-[0.12em] min-h-[1em] font-mulish font-semibold leading-none tracking-[-0.04em] text-[#c0d4ef]"
+            className="ml-[0.05em] mt-[0.12em] min-h-[1em] font-mulish font-bold leading-none tracking-[-0.04em] text-[#c0d4ef]"
             suppressHydrationWarning
           >
             {today}

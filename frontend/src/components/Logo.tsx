@@ -18,9 +18,9 @@ export function LogoMark({ className = "" }: { className?: string }) {
 export function Logo() {
   return (
     <span className="flex items-start">
-      <LogoMark className="h-[1.29em] w-[1.29em] shrink-0" />
+      <LogoMark className="h-[1.29em] w-[1.29em] shrink-0 overflow-visible" />
       <span className="ml-[0.3em] mt-[0.4em] whitespace-nowrap font-mulish font-bold leading-none tracking-[-0.08em] text-[#031d4e]">
-        recall me maybe
+        Recall Me Maybe
       </span>
     </span>
   );

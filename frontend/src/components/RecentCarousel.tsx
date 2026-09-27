@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { ProductCard as Product } from "@/lib/types";
 import { ProductCard } from "./ProductCard";
 
-const CARD_STEP = 365; // 335px card + 30px gap
+const CARD_STEP = 351; // 335px card + 30px gap
 const SPEED = 40; // px per second
 
 /**
@@ -133,7 +133,7 @@ export function RecentCarousel({ products }: { products: Product[] }) {
               // Only the first run of the middle copy is exposed to keyboards and screen readers
               const isDupe = copy !== 1 || i >= products.length;
               return (
-                <div key={i} className="box-content w-[335px] shrink-0 pr-[30px]" aria-hidden={isDupe || undefined}>
+                <div key={i} className="box-content w-[335px] shrink-0 pr-[16px]" aria-hidden={isDupe || undefined}>
                   <ProductCard product={product} tabIndex={isDupe ? -1 : undefined} />
                 </div>
               );

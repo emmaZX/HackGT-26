@@ -1,7 +1,8 @@
 import { ProductCard } from "./types";
 
 /** Notable product title first; brand after when it adds something. */
-export function fullName(p: ProductCard) {
+export function fullName(p: { name: string; brand?: string | null }) {
+
   const brand = p.brand && p.brand !== "Unknown" ? p.brand : "";
   const title = p.name?.trim() || "Unknown product";
   if (!brand) return title;
