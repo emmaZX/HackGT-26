@@ -406,9 +406,9 @@ def _seed_watch_product(db: Session, item: dict) -> Product:
     return product
 
 def _overlay_fda_recalls(db: Session, limit: int = 25) -> None:
-    """Attach only Ongoing FDA recalls onto watchlist products when product+hazard match."""
+    """Attach Ongoing FDA recalls to watchlist matches and upsert extra grocery SKUs."""
     purge_non_ongoing_recalls(db)
-    recalls = fetch_recent_food_recalls(limit=max(limit, 40))
+    recalls = fetch_recent_food_recalls(limit=max(limit, 80))
     pool = [item for item in recalls if (item.get("status") or "").lower() == "ongoing"]
     # Extra targeted Ongoing searches for watch products still unmatched.
     pool.extend(
@@ -416,8 +416,20 @@ def _overlay_fda_recalls(db: Session, limit: int = 25) -> None:
         for item in _targeted_watch_recalls()
         if (item.get("status") or "").lower() == "ongoing"
     )
+    # De-dupe by recall id / slug while preserving order.
+    seen_keys: set[str] = set()
+    deduped: list[dict] = []
+    for item in pool:
+        key = str(item.get("recall_id") or item.get("slug") or "")
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+    pool = deduped
+
     watch = {p.slug: p for p in db.query(Product).filter(Product.category == "Food").all()}
-    matched_slugs: set[str] = set()
+    fda_extra = 0
+    max_extra = max(limit, 60)
 
     for item in pool:
         if (item.get("status") or "").lower() != "ongoing":
@@ -425,24 +437,43 @@ def _overlay_fda_recalls(db: Session, limit: int = 25) -> None:
         matched = _match_watch_product(watch, item)
         if matched:
             _attach_recall(db, matched, item)
-            matched_slugs.add(matched.slug)
             continue
 
-        # Don't flood the home shelf with every Taylor Farms SKU variant —
-        # watchlist cards already carry the FDA RECALL overlay when matched.
-        if matched_slugs:
+        existing = db.query(Product).filter(Product.slug == item["slug"]).one_or_none()
+        if existing:
+            if item.get("brand"):
+                existing.brand = str(item["brand"])[:120]
+            if item.get("name"):
+                existing.name = str(item["name"])[:180]
+            if item.get("summary"):
+                existing.summary = str(item["summary"])[:500]
+            _attach_recall(db, existing, item)
+            watch[existing.slug] = existing
             continue
-        if db.query(Product).filter(Product.slug == item["slug"]).one_or_none():
+
+        if fda_extra >= max_extra:
             continue
-        hazard = (item.get("hazard") or "").lower()
-        if not any(n in hazard for n in ("cyclospora", "salmonella", "listeria", "e. coli", "contamination")):
-            continue
-        official_only = (
-            db.query(Product)
-            .filter(Product.category == "Food", ~Product.slug.in_(list(watch.keys())))
-            .count()
-        )
-        if official_only >= 3:
+        hazard = (item.get("hazard") or item.get("reason") or "").lower()
+        # Prefer pathogen / allergen / contamination notices for the bigger shelf.
+        if hazard and not any(
+            n in hazard
+            for n in (
+                "cyclospora",
+                "salmonella",
+                "listeria",
+                "e. coli",
+                "e coli",
+                "contamination",
+                "allergen",
+                "undeclared",
+                "botulism",
+                "hepatitis",
+                "cronobacter",
+                "lead",
+                "metal",
+                "glass",
+            )
+        ):
             continue
         product = Product(
             slug=item["slug"][:160],
@@ -455,6 +486,10 @@ def _overlay_fda_recalls(db: Session, limit: int = 25) -> None:
         db.add(product)
         db.flush()
         _attach_recall(db, product, item)
+        watch[product.slug] = product
+        fda_extra += 1
+    polish_catalog_titles(db)
+    logger.info("FDA overlay attached (extra SKUs=%s, pool=%s)", fda_extra, len(pool))
 
 
 def _targeted_watch_recalls() -> list[dict]:
@@ -628,15 +663,17 @@ def _strip_headline_excerpt(text: str) -> str:
 
 def seed_community_from_web(db: Session) -> dict:
     """
-    Fixed query pack → triage → CommunityEvidence gate → upsert products/reports.
-    Honest empty if no search keys or nothing recent validates.
+    Fixed grocery corpus: crawl iWasPoisoned industry list (Playwright), then
+    optionally enrich via Exa (grocery only — no Reddit). User search still uses Exa.
     """
     from .agents.page_fetch_agent import fetch_candidates
     from .agents.triage_agent import should_ingest_as_internet_evidence, triage_complaint
     from .agents.geo_agent import correlate_location
     from .data_sources.page_fetch import domain_of
     from .data_sources.web_search import available_provider, search_web
+    from .data_sources.iwaspoisoned_crawl import crawl_grocery_incidents
     from .pipeline.evidence_schema import (
+        is_allowed_iwaspoisoned_url,
         parse_observed_at,
         source_label_for_url,
         validate_community_evidence,
@@ -644,83 +681,74 @@ def seed_community_from_web(db: Session) -> dict:
     from .pipeline.cluster import attach_and_dedupe
 
     settings = get_settings()
-    provider = available_provider()
-    if not provider:
-        return {"ingested": 0, "skipped": "no_search_key"}
-
     days = settings.discovery_recency_days
     year = datetime.utcnow().year
-    # Cast a wide net across ~90d of grocery illness reports, then connect
-    # specific product · brand dots (never collapse into "Grocery foods").
-    stores = "(Costco OR Walmart OR Kroger OR Aldi OR Publix OR Target OR Safeway OR \"Trader Joe\" OR \"Whole Foods\" OR \"Giant Eagle\" OR Meijer OR H-E-B OR Wegmans)"
-    foods = (
-        "(chicken OR turkey OR salad OR sandwich OR wings OR hummus OR chips OR mango OR "
-        "burger OR bake OR deli OR romaine OR yogurt OR \"ice cream\" OR cheese OR milk OR "
-        "sushi OR pizza OR soup OR produce OR fruit OR meat OR seafood OR cookie OR hotdog)"
+
+    # 1) Direct HTTPS crawl of grocery listing (capped).
+    crawl = crawl_grocery_incidents(
+        max_pages=getattr(settings, "iwp_crawl_max_pages", 8),
+        max_incidents=getattr(settings, "iwp_crawl_max_incidents", 60),
+        days=days,
     )
-    queries = [
-        f"site:iwaspoisoned.com/incident {stores} {foods} {year}",
-        f"site:iwaspoisoned.com/incident {stores} (illness OR poisoning OR sick OR vomiting OR diarrhea) {year}",
-        f"site:iwaspoisoned.com/industry/grocery_or_supermarket (sick OR vomiting OR diarrhea) {year}",
-        f"site:iwaspoisoned.com/incident Costco (chicken OR salad OR sandwich OR bake OR hummus OR meal) {year}",
-        f"site:iwaspoisoned.com/incident Walmart (chicken OR salad OR wings OR \"ice cream\" OR deli) {year}",
-        f"site:iwaspoisoned.com/incident Kroger (salad OR deli OR chicken OR produce OR dairy) {year}",
-        f"site:iwaspoisoned.com/incident (Aldi OR Publix OR Target) (illness OR sick OR poisoning) {year}",
-        f"site:iwaspoisoned.com/incident (\"Trader Joe\" OR Safeway OR Meijer OR Wegmans) (illness OR sick) {year}",
-        f'site:reddit.com/r/foodpoisoning {stores} (sick OR vomiting OR diarrhea) {year}',
-        f'site:reddit.com ("food poisoning" OR "got sick" OR "foodborne") {stores} {year}',
-        f'site:reddit.com/r/Costco (sick OR vomiting OR "food poisoning" OR diarrhea) {year}',
-        f'site:reddit.com/r/walmart (sick OR vomiting OR "food poisoning") (food OR deli OR chicken) {year}',
-        f"site:iwaspoisoned.com/incident (romaine OR cantaloupe OR spinach OR sprouts) {stores} {year}",
-        f"site:iwaspoisoned.com/incident (yogurt OR cheese OR milk OR \"ice cream\") {stores} {year}",
-        f'{stores} {foods} ("food poisoning" OR "got sick") site:reddit.com {year}',
-        f"site:iwaspoisoned.com/incident (sushi OR seafood OR shrimp OR salmon) {stores} {year}",
-        f"site:iwaspoisoned.com/tag/Costco OR site:iwaspoisoned.com/tag/Walmart {year}",
-        f"site:iwaspoisoned.com/incident (Kirkland OR \"Great Value\" OR SimpleTruth) (illness OR sick) {year}",
-        f'after:{(datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")} {stores} "food poisoning" grocery',
-        f'site:iwaspoisoned.com/incident {stores} after:{(datetime.utcnow() - timedelta(days=min(days, 92))).strftime("%Y-%m-01")}',
-    ][: max(1, settings.community_seed_queries)]
-
-    per_q = max(3, getattr(settings, "community_seed_per_query", 8))
-    hits = search_web(queries, limit_per_query=per_q) or []
-    provider = (hits[0].provider if hits else provider) or provider
-    if not hits:
-        db.add(
-            DiscoveryRun(
-                product_id=None,
-                query=" | ".join(queries)[:900],
-                provider=f"cseed:{provider}"[:40],
-                result_count=0,
-                notes="no hits",
-            )
+    candidates: list[dict] = []
+    for inc in crawl.get("incidents") or []:
+        candidates.append(
+            {
+                "final_url": inc.url,
+                "url": inc.url,
+                "text": inc.text,
+                "title": inc.title,
+                "snippet": (inc.text or "")[:400],
+                "published_date": inc.published,
+                "host": "iwaspoisoned.com",
+                "from_crawl": True,
+            }
         )
-        return {"ingested": 0, "provider": provider, "hits": 0}
 
-    from .pipeline.evidence_schema import is_allowed_iwaspoisoned_url
+    # 2) Optional Exa grocery supplement (never Reddit) when crawl is thin.
+    # Keep this tiny — home corpus should come from the HTTPS crawl, not Exa burn.
+    provider = available_provider()
+    hits: list = []
+    crawl_ok = not crawl.get("error") and (crawl.get("listed") or 0) > 0
+    if provider and len(candidates) < 15 and crawl_ok:
+        queries = [
+            f"site:iwaspoisoned.com/incident (Costco OR Walmart OR Kroger OR Aldi) (sick OR vomiting) {year}",
+            f"site:iwaspoisoned.com/industry/grocery_or_supermarket (sick OR diarrhea) {year}",
+        ]
+        hits = search_web(queries, limit_per_query=5) or []
+        provider = (hits[0].provider if hits else provider) or provider
+    elif not crawl_ok:
+        logger.warning(
+            "Skipping Exa supplement — crawl error=%s pages=%s",
+            crawl.get("error"),
+            crawl.get("pages"),
+        )
 
     def skip_url(url: str) -> bool:
         host = domain_of(url or "")
         if any(host.endswith(h) or host == h for h in ("fda.gov", "cdc.gov", "fsis.usda.gov", "usda.gov")):
             return True
-        # Drop restaurant iWasPoisoned pages even if Exa returned them.
+        if "reddit.com" in (url or "").lower():
+            return True
         if "iwaspoisoned.com" in (url or "").lower() and not is_allowed_iwaspoisoned_url(url):
             return True
         return False
 
-    pages = fetch_candidates(
-        hits,
-        limit=settings.community_seed_pages,
-        skip_url=skip_url,
-        rank_url=lambda u: 0 if "iwaspoisoned" in (u or "") or "reddit.com" in (u or "") else 2,
-        is_ingestible=lambda u: bool(u and u.startswith("http")),
-        is_agency=skip_url,
-    )
-
-    # If page fetch fails (common for some hosts), fall back to Exa title+snippet
-    # only when a publish date is available — still fail-closed on observed_at.
-    candidates: list[dict] = list(pages)
-    fetched_urls = {(p.get("final_url") or "").split("#")[0].rstrip("/") for p in pages}
-    if len(candidates) < settings.community_seed_pages:
+    if hits:
+        pages = fetch_candidates(
+            hits,
+            limit=min(40, settings.community_seed_pages),
+            skip_url=skip_url,
+            rank_url=lambda u: 0 if "iwaspoisoned" in (u or "") else 2,
+            is_ingestible=lambda u: bool(u and u.startswith("http")),
+            is_agency=skip_url,
+        )
+        fetched_urls = {(c.get("final_url") or "").split("#")[0].rstrip("/") for c in candidates}
+        for p in pages:
+            url = (p.get("final_url") or p.get("url") or "").split("#")[0].rstrip("/")
+            if url and url not in fetched_urls:
+                candidates.append(p)
+                fetched_urls.add(url)
         for hit in hits:
             url = (getattr(hit, "url", None) or "").split("#")[0].rstrip("/")
             if not url or url in fetched_urls or skip_url(url):
@@ -744,8 +772,26 @@ def seed_community_from_web(db: Session) -> dict:
                     "host": domain_of(url),
                 }
             )
-            if len(candidates) >= settings.community_seed_pages:
-                break
+            fetched_urls.add(url)
+
+    if not candidates:
+        db.add(
+            DiscoveryRun(
+                product_id=None,
+                query="iwp-crawl+exa-grocery",
+                provider=f"cseed:{provider or 'crawl'}"[:40],
+                result_count=0,
+                notes=f"no candidates crawl_err={crawl.get('error')} pages={crawl.get('pages')}",
+            )
+        )
+        return {
+            "ingested": 0,
+            "provider": provider or "crawl",
+            "hits": len(hits),
+            "crawl": {k: crawl.get(k) for k in ("pages", "listed", "capped", "error")},
+        }
+
+    pages = [c for c in candidates if c.get("from_crawl")]
 
     ingested = 0
     rejected = 0
@@ -866,8 +912,14 @@ def seed_community_from_web(db: Session) -> dict:
         ingested += 1
 
     # Connect dots: merge only near-identical product · brand stems (keep specifics).
-    enriched = _enrich_community_products(db, skip_url=skip_url, days=days)
-    ingested += enriched
+    # Skip Exa enrichment when the HTTPS crawl already built a thick corpus —
+    # otherwise we burn hundreds of Exa calls chasing second URLs.
+    enriched = 0
+    if ingested < 40:
+        enriched = _enrich_community_products(db, skip_url=skip_url, days=days)
+        ingested += enriched
+    else:
+        logger.info("Skipping Exa enrichment — crawl already ingested %s reports", ingested)
     merged = _merge_near_duplicate_community(db)
     merged += _cluster_specific_patterns(db)
     _refresh_pattern_summaries(db)
@@ -875,12 +927,14 @@ def seed_community_from_web(db: Session) -> dict:
     db.add(
         DiscoveryRun(
             product_id=None,
-            query=" | ".join(queries)[:900],
-            provider=f"cseed:{provider}"[:40],
-            result_count=len(hits),
+            query="iwp-crawl+exa-grocery",
+            provider=f"cseed:{provider or 'crawl'}"[:40],
+            result_count=len(hits) + len(crawl.get("incidents") or []),
             notes=(
-                f"ingested={ingested} rejected={rejected} pages={len(pages)} "
-                f"candidates={len(candidates)} enriched={enriched} merged={merged}"
+                f"ingested={ingested} rejected={rejected} "
+                f"candidates={len(candidates)} enriched={enriched} merged={merged} "
+                f"crawl_pages={crawl.get('pages')} crawl_listed={crawl.get('listed')} "
+                f"crawl_kept={len(crawl.get('incidents') or [])} capped={crawl.get('capped')}"
             )[:1000],
         )
     )
@@ -892,7 +946,14 @@ def seed_community_from_web(db: Session) -> dict:
         "candidates": len(candidates),
         "enriched": enriched,
         "merged": merged,
-        "provider": provider,
+        "provider": provider or "crawl",
+        "crawl": {
+            "pages": crawl.get("pages"),
+            "listed": crawl.get("listed"),
+            "kept": len(crawl.get("incidents") or []),
+            "capped": crawl.get("capped"),
+            "error": crawl.get("error"),
+        },
     }
 
 
@@ -1162,13 +1223,14 @@ def _enrich_community_products(db: Session, *, skip_url, days: int) -> int:
     from .data_sources.page_fetch import domain_of
 
     settings = get_settings()
+    # Cap hard — this path is optional multi-URL enrichment, not the primary corpus.
     min_urls = max(2, settings.community_min_url_reports)
     added = 0
     web_products = (
         db.query(Product)
         .filter(Product.category == "Food", Product.slug.like("web-%"))
         .order_by(Product.id.desc())
-        .limit(40)
+        .limit(8)
         .all()
     )
     for product in web_products:
@@ -1183,13 +1245,9 @@ def _enrich_community_products(db: Session, *, skip_url, days: int) -> int:
         year = datetime.utcnow().year
         follow = [
             f'site:iwaspoisoned.com/incident "{product.name}" {product.brand} {year}',
-            f'site:iwaspoisoned.com/incident {product.brand} "{product.name}" (illness OR poisoning OR sick) {year}',
             f'site:iwaspoisoned.com/incident {product.brand} {_product_stem(product.name)} (illness OR sick) {year}',
-            f'site:reddit.com "{product.name}" {product.brand} (sick OR vomiting OR "food poisoning") {year}',
-            f'{product.brand} "{product.name}" ("food poisoning" OR "got sick" OR vomiting) -site:fda.gov -site:cdc.gov {year}',
-            f'site:reddit.com {product.brand} {_product_stem(product.name)} (sick OR poisoning) {year}',
         ]
-        hits = search_web(follow, limit_per_query=6) or []
+        hits = search_web(follow, limit_per_query=4) or []
         name_l = (product.name or "").lower()
         brand_l = (product.brand or "").lower()
         for hit in hits:
@@ -1608,7 +1666,7 @@ def _overlay_caers(db: Session) -> None:
 
     ranked = sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)
     # Cap entity count so SQLite stays snappy — but keep a large grocery shelf.
-    top = ranked[:120]
+    top = ranked[:200]
     spiked = 0
     for key, items in top:
         sample = items[0]

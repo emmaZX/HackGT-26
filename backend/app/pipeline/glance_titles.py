@@ -78,7 +78,7 @@ _FOOD_WORD = re.compile(
     r"burrito|taco|sandwich|soup|stew|pizza|burger|nuggets|wings|bake|"
     r"hummus|hotdog|hot\s*dog|cookie|meal|produce|grocery|fruit|vegetable|"
     r"yogurt|smoothie|juice|bread|bagel|muffin|rice|bean|noodle|"
-    r"prepared|snacks?|dairy|poultry|foods"
+    r"prepared|snacks?|dairy|poultry|foods|store|purchase"
     r")\b",
     re.I,
 )
@@ -166,6 +166,8 @@ def glance_title(*, brand: str | None, name: str | None) -> dict | None:
     item = re.sub(r"\s+(causes?|to)$", "", item, flags=re.I).strip(" ,.-–—")
     if item.lower() in {"meal", "costco meal", "prepared meal"}:
         item = "Prepared meal"
+    if item.lower() in {"in-store food", "instore food", "store food", "grocery purchase"}:
+        item = "In-store food"
     if item.lower() in {"milk cheese", "milk cheeses"}:
         item = "Raw milk cheese"
     if item.lower() in {"soft cheeses", "soft / queso-style cheeses", "soft cheese"}:

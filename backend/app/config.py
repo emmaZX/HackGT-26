@@ -48,32 +48,35 @@ class Settings(BaseSettings):
     # Live bootstrap (hybrid demo path)
     seed_demo: bool = False
     seed_fake_posts: bool = False
-    cpsc_recall_limit: int = 25
-    fda_food_recall_limit: int = 25
+    cpsc_recall_limit: int = 40
     # Light home scrape — default 0 so category Exa is not the home filler.
     home_scrape_products: int = 0
     home_scrape_pages: int = 3
     home_scrape_queries: int = 1
     search_scrape_pages: int = 5
     discovery_cooldown_minutes: int = 20
-    # Prefer recent complaints / Ongoing notices (days) — past couple of months.
-    discovery_recency_days: int = 90
+    # Prefer recent complaints / Ongoing notices (days) — ~2 months.
+    discovery_recency_days: int = 60
     # Min URL-backed reports to show an unofficial card (1 = surface the corpus;
     # multi-URL patterns still rank higher via evidence_count / report_count).
     community_min_url_reports: int = 1
-    # Wide scrape so specific product patterns can emerge across ~90d.
-    community_seed_queries: int = 20
-    community_seed_pages: int = 80
-    community_seed_per_query: int = 8
+    # Wide scrape so specific product patterns can emerge across ~60d.
+    community_seed_queries: int = 12
+    community_seed_pages: int = 100
+    community_seed_per_query: int = 10
+    # iWasPoisoned grocery HTTPS crawl — sized for ~2 months of grocery reports.
+    iwp_crawl_max_pages: int = 40
+    iwp_crawl_max_incidents: int = 400
 
-    # CAERS spike engine — keep closer to the recency window for home honesty.
-    caers_lookback_days: int = 90
-    caers_fetch_limit: int = 3000
-    caers_spike_min_reports: int = 5
-    caers_spike_velocity: float = 2.0
+    # CAERS lags wall-clock; keep a wide lookback so volume spikes still surface.
+    caers_lookback_days: int = 270
+    caers_fetch_limit: int = 8000
+    caers_spike_min_reports: int = 2
+    caers_spike_velocity: float = 1.2
     official_recall_max_age_days: int = 90
-    fsis_recall_limit: int = 40
-    outbreak_limit: int = 15
+    fda_food_recall_limit: int = 80
+    fsis_recall_limit: int = 100
+    outbreak_limit: int = 40
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -43,16 +43,24 @@ def fetch_recent_events(
         searches.append(f"date_created:[{s} TO {e}]")
 
     raw_rows: list[dict] = []
+    best_search = None
     with httpx.Client(timeout=45, follow_redirects=True, trust_env=False) as client:
         for search in searches:
-            raw_rows = _paginate(client, search, fetch_limit)
-            if raw_rows:
-                logger.info("CAERS search hit via %s (%s rows)", search, len(raw_rows))
+            batch = _paginate(client, search, fetch_limit)
+            if len(batch) > len(raw_rows):
+                raw_rows = batch
+                best_search = search
+            # Enough volume for the demo shelf — stop early.
+            if len(raw_rows) >= min(fetch_limit, 500):
                 break
         if not raw_rows:
             raw_rows = _paginate(client, None, min(fetch_limit, 1000))
+            best_search = best_search or "unsorted"
 
+    if best_search:
+        logger.info("CAERS search hit via %s (%s rows)", best_search, len(raw_rows))
     logger.info("CAERS fetched %s raw events (lookback=%sd)", len(raw_rows), lookback_days)
+
     normalized: list[dict] = []
     for row in raw_rows:
         for item in _normalize_event(row):
@@ -63,7 +71,8 @@ def fetch_recent_events(
 def _paginate(client: httpx.Client, search: str | None, fetch_limit: int) -> list[dict]:
     raw_rows: list[dict] = []
     skip = 0
-    page = min(1000, max(100, fetch_limit))
+    # openFDA is flaky with limit=1000 on some date searches — keep pages modest.
+    page = 100
     while len(raw_rows) < fetch_limit:
         params: dict = {
             "limit": min(page, fetch_limit - len(raw_rows)),
@@ -88,7 +97,7 @@ def _paginate(client: httpx.Client, search: str | None, fetch_limit: int) -> lis
             skip += len(batch)
             if total is not None and skip >= int(total):
                 break
-            if len(batch) < page:
+            if len(batch) < params["limit"]:
                 break
         except Exception:
             logger.exception("CAERS fetch failed at skip=%s", skip)

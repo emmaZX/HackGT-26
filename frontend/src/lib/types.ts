@@ -71,6 +71,8 @@ export type ProductCard = {
   local: boolean;
   tags: string[];
   source_tier?: SourceTier;
+  evidence_count?: number;
+  evidence?: { source_url: string; source: string; observed_at: string | null; excerpt: string }[];
 };
 
 export type ReportCard = {

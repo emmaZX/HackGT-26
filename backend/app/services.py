@@ -106,9 +106,9 @@ def list_feed(db: Session, city: str | None = None) -> dict:
         )
     return {
         "important": important,
-        "official": official[:20],
-        "caers_spikes": caers_spikes[:24],
-        "unofficial": unofficial[:30],
+        "official": official[:40],
+        "caers_spikes": caers_spikes[:40],
+        "unofficial": unofficial[:60],
         "nearby": nearby,
         "trending": trending,
         "recent_reports": [

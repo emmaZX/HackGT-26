@@ -30,7 +30,7 @@ VAGUE_NAMES = re.compile(
     r"^(prepared\s+chicken|meal[- ]?kit.*|food\s+item|various|unidentified|"
     r"product|item|food|unknown|grocery(\s+(item|foods))?|grocery\s+or\s+supermarket.*|"
     r"got\s+sick.*|what\s+you\s+need.*|prepared\s+foods?|produce|snacks?|"
-    r"dairy|meat\s*&\s*poultry|store\s+foods?)$",
+    r"dairy|meat\s*&\s*poultry|store\s+foods?|food\s+safety.*)$",
     re.I,
 )
 
@@ -237,7 +237,8 @@ _GROCERY_BRANDS = re.compile(
     r"\b(Costco|Walmart|Kroger|Publix|Aldi|Trader\s*Joe'?s?|Safeway|Whole\s*Foods|"
     r"Food\s*Lion|H-?E-?B|Meijer|Target|Sam'?s\s*Club|Sprouts|Wegmans|"
     r"Harris\s*Teeter|Giant\s*Eagle|Lid[l]|ShopRite|Albertsons|Fred\s*Meyer|"
-    r"Kirkland(?:\s+Signature)?)\b",
+    r"Kirkland(?:\s+Signature)?|Weis(?:\s*Markets)?|Piggly\s*Wiggly|"
+    r"Dollar\s*Tree|BJ'?s(?:\s*Wholesale)?|Brookshire'?s?)\b",
     re.I,
 )
 
@@ -281,8 +282,10 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
     Parses iWasPoisoned patterns like:
       "Chicken Bake Illness Report - Costco, Eugene Oregon"
       "Hot Wings Cause Illness - Walmart, Florence South Carolina"
+      "Food Safety Report: Walmart Supercenter, Panama City, FL"
     """
     text = re.sub(r"\s+", " ", (raw_title or "").strip())
+    text = re.sub(r"^food\s+safety\s+reports?:\s*", "", text, flags=re.I)
     brand = ""
     left = text
     right = ""
@@ -305,13 +308,19 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
         left = re.sub(re.escape(brand), " ", left, flags=re.I)
     left = _IWP_CHROME.sub(" ", left)
     left = _CITY_TAIL.sub("", left)
+    # Strip address / supercenter / street residue
+    left = re.sub(
+        r"\b(supercenter|neighborhood\s+market|marketplace|wholesale|club|"
+        r"avenue|street|road|blvd|boulevard|drive|hwy|highway|lane)\b.*$",
+        " ",
+        left,
+        flags=re.I,
+    )
     left = re.sub(r"\s+", " ", left).strip(" ,.-–—:;")
-    # Trailing "Cause(s)" residue after chrome strip
     left = re.sub(r"\s+causes?\s*$", "", left, flags=re.I).strip(" ,.-–—")
 
-    # Fallback product when title is brand-only illness chrome
     if len(left) < 3:
-        left = "Grocery item"
+        left = "In-store food"
 
     from .glance_titles import glance_title
 
@@ -319,7 +328,9 @@ def split_grocery_identity(raw_title: str) -> tuple[str, str]:
     if titled:
         out_brand = titled["brand"] if titled["brand"] not in {"", "Unknown"} else brand
         return (out_brand or brand or "", titled["name"])
-    # Soft fallback — still prefer a short cleaned left over a news headline
+    # Soft fallback for store-level grocery reports with no named SKU
+    if brand:
+        return (brand, "In-store food")
     soft = left[:40].strip(" ,.-–—") or "Grocery item"
     return (brand, soft)
 

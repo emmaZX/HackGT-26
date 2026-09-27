@@ -2,8 +2,7 @@ import { ProductCard } from "./types";
 
 /** Notable product title first; brand after when it adds something. */
 export function fullName(p: { name: string; brand?: string | null }) {
-
-  const brand = p.brand && p.brand !== "Unknown" ? p.brand : "";
+  const brand = p.brand && p.brand !== "Unknown" ? p.brand.trim() : "";
   const title = p.name?.trim() || "Unknown product";
   if (!brand) return title;
   if (title.toLowerCase().includes(brand.toLowerCase())) return title;
@@ -53,28 +52,48 @@ const STATUS_TEXT: Record<string, string> = {
   "EMERGING SIGNAL": "Emerging signal",
   "ELEVATED REPORTS": "More reports than usual",
   "LIMITED REPORTS": "A few reports",
+  "OUTBREAK WATCH": "Outbreak watch",
+  "CAERS SPIKE": "Complaint spike",
+  UNOFFICIAL: "Community",
 };
 
 /** Kicker above the headline: status, then where it comes from */
 export function kicker(p: ProductCard) {
   const recall = activeRecall(p);
   const recallTag = p.tags.find((t) => t.endsWith("RECALL") && t in STATUS_TEXT);
-  const statusTag = recallTag || p.tags.find((t) => t in STATUS_TEXT);
+  const statusTag =
+    recallTag ||
+    p.tags.find((t) => t in STATUS_TEXT) ||
+    (p.source_tier === "caers" ? "CAERS SPIKE" : null) ||
+    (p.source_tier === "unofficial" ? "UNOFFICIAL" : null);
   const internetFirst = p.tags.includes("INTERNET FIRST");
+  const tier = p.source_tier || p.signal?.source_tier;
+  let source = "Online reports";
+  if (recall) source = "Official notice";
+  else if (tier === "caers") source = "CAERS reports";
+  else if (internetFirst) source = "Spotted online first";
+  else if (tier === "unofficial") source = "Community / open web";
   return {
     status: statusTag ? STATUS_TEXT[statusTag] : null,
     isRecall: !!recall,
-    source: recall ? "Official notice" : internetFirst ? "Spotted online first" : "Online reports",
+    source,
   };
 }
 
-/** Meta line under the headline: where, and what changed recently */
+/** Meta line under the headline: where, linked sources, and what changed recently */
 export function meta(p: ProductCard) {
   const s = p.signal;
   const recall = activeRecall(p);
   const parts: string[] = [];
   if (recall?.nationwide) parts.push("Nationwide");
   else if (s.geography[0]) parts.push(s.geography[0].label);
+
+  const evidenceCount = p.evidence_count;
+  if (typeof evidenceCount === "number" && evidenceCount > 0) {
+    parts.push(`${evidenceCount} linked source${evidenceCount === 1 ? "" : "s"}`);
+  } else if (s.report_count > 1) {
+    parts.push(`${s.report_count} reports`);
+  }
 
   if (recall?.recall_date) {
     const d = new Date(recall.recall_date);
