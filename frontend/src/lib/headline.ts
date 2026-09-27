@@ -24,7 +24,27 @@ function activeRecall(p: ProductCard) {
   return r && r.phase !== "past" ? r : null;
 }
 
-/** A news-style headline built from data the backend already sends */
+/** Issue labels as they read in a headline; vague or junk labels are dropped */
+const ISSUE_WORDS: Record<string, string | null> = {
+  "throw up": "vomiting",
+  "unspecified issue": null,
+  cry: null,
+};
+
+function issueWord(name: string | undefined) {
+  if (!name) return null;
+  const key = name.trim().toLowerCase();
+  return key in ISSUE_WORDS ? ISSUE_WORDS[key] : key || null;
+}
+
+/** Same product always gets the same phrasing, neighbours usually differ */
+function pick<T>(seed: string, options: T[]): T {
+  let h = 0;
+  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return options[Math.abs(h) % options.length];
+}
+
+/** A news-style headline built from data the backend already sends: product first */
 export function headline(p: ProductCard) {
   const s = p.signal;
   const recall = activeRecall(p);
@@ -39,9 +59,17 @@ export function headline(p: ProductCard) {
   const people = s.independent_count || s.report_count;
   if (!people) return title;
   const top = [...s.issues].sort((a, b) => b.count - a.count)[0];
-  const who = people === 1 ? "1 person reports" : `${people} people report`;
-  const what = top ? top.name.toLowerCase() : "problems";
-  return `${who} ${what} with ${title}`;
+  const what = issueWord(top?.name);
+  const seed = p.slug || title;
+
+  // A single untagged report adds nothing the kicker doesn't already say
+  if (people === 1 && !what) return title;
+  if (people === 1) {
+    return pick(seed, [`${title}: ${what} reported`, `${title}: ${what} complaint`, `${title}: shopper cites ${what}`]);
+  }
+  return what
+    ? pick(seed, [`${title}: ${people} ${what} reports`, `${title}: ${people} people cite ${what}`])
+    : pick(seed, [`${title}: ${people} complaints`, `${title}: ${people} people report problems`]);
 }
 
 const STATUS_TEXT: Record<string, string> = {
